@@ -3,71 +3,71 @@
     "rank": "PTE",
     "name": "SIDDARTH SREEKUMAR CHERUBAL",
     "unavailable_dates": [],
-    "preferred_dates": "Weekends AM"
+    "preferred_dates": ["Sat AM", "Sun AM"]
   },
   {
     "rank": "PTE",
     "name": "CLARENCE ONG JUN YI",
     "unavailable_dates": [
-      { "dates": "1 - 30 Apr", "reason": "REBMT" }
+      { "dates": "1-30", "reason": "REBMT" }
     ],
-    "preferred_dates": null
+    "preferred_dates": []
   },
   {
     "rank": "PTE",
     "name": "XINHANG",
     "unavailable_dates": [
-      { "dates": "1 - 30 Apr", "reason": "REBMT" }
+      { "dates": "1-30", "reason": "REBMT" }
     ],
-    "preferred_dates": null
+    "preferred_dates": []
   },
   {
     "rank": "PTE",
     "name": "SONG HAOYAN",
     "unavailable_dates": [
-      { "dates": "1 - 30 Apr", "reason": "REBMT" }
+      { "dates": "1-30", "reason": "REBMT" }
     ],
-    "preferred_dates": null
+    "preferred_dates": []
   },
   {
     "rank": "PTE",
     "name": "DARYL SEOW SHI YU",
     "unavailable_dates": [],
-    "preferred_dates": "Mon / Tues"
+    "preferred_dates": ["Mon", "Tue"]
   },
   {
     "rank": "PTE",
     "name": "MUHAMMAD NORSYAFIQ BIN SELAMAT",
     "unavailable_dates": [],
-    "preferred_dates": "Wednesdays"
+    "preferred_dates": ["Wed"]
   },
   {
     "rank": "PTE",
     "name": "OH EE BING",
     "unavailable_dates": [
-      { "dates": "5 - 10 Apr", "reason": "DE" },
-      { "dates": "8 Apr", "reason": "MA" },
-      { "dates": "22 - 23 Apr", "reason": "DE" }
+      { "dates": "5-10", "reason": "DE" },
+      { "dates": "8", "reason": "MA" },
+      { "dates": "22-23", "reason": "DE" }
     ],
-    "preferred_dates": "Mon - Thu"
+    "preferred_dates": ["Mon", "Tue", "Wed", "Thu"]
   },
   {
     "rank": "REC",
     "name": "MUHAMMAD NUR HAKIM BIN SHAHARIZIN",
     "unavailable_dates": [],
-    "preferred_dates": "Mondays, Wednesdays"
+    "preferred_dates": ["Mon", "Wed"]
   },
   {
     "rank": "CPL",
     "name": "SURIAPRAKASH THRIUVALAKU",
     "unavailable_dates": [],
-    "preferred_dates": "Weekends PM"
+    "preferred_dates": ["Sat PM", "Sun PM"]
   },
   {
     "rank": "PTE",
     "name": "FATHUL HAKIM BIN MUHAMMAD FAUZI",
     "unavailable_dates": [],
-    "preferred_dates": "Fridays"
+    "preferred_dates": ["Fri"]
   },
   {
     "rank": "PTE",
@@ -75,106 +75,106 @@
     "unavailable_dates": [
       { "dates": "All weekends", "reason": "Not available on weekends" }
     ],
-    "preferred_dates": "Mondays, Wednesdays"
+    "preferred_dates": ["Mon", "Wed"]
   },
   {
     "rank": "3SG",
     "name": "ANISH VINAAYAK SIVASANKAR",
     "unavailable_dates": [
-      { "dates": "6 - 9 Apr", "reason": "DE" },
-      { "dates": "17 Apr", "reason": "MSP" },
-      { "dates": "23 Apr", "reason": "DE" }
+      { "dates": "6-9", "reason": "DE" },
+      { "dates": "17", "reason": "MSP" },
+      { "dates": "23", "reason": "DE" }
     ],
-    "preferred_dates": "Mon - Thu, 3 Apr (AM), 15 Apr, 20 Apr"
+    "preferred_dates": ["Mon", "Tue", "Wed", "Thu", "3 AM", "15", "20"]
   },
   {
     "rank": "LCP",
     "name": "DYLAN TAN",
     "unavailable_dates": [
-      { "dates": "17 Apr", "reason": "MSP" }
+      { "dates": "17", "reason": "MSP" }
     ],
-    "preferred_dates": "11 Apr (AM), 25 Apr (AM)"
+    "preferred_dates": ["11 AM", "25 AM"]
   },
   {
     "rank": "PTE",
     "name": "SHAVIN VALEN",
     "unavailable_dates": [
-      { "dates": "5 - 10 Apr", "reason": "DE" },
-      { "dates": "11 - 12 Apr", "reason": "Family Event" },
-      { "dates": "22 - 23 Apr", "reason": "DE" }
+      { "dates": "5-10", "reason": "DE" },
+      { "dates": "11-12", "reason": "Family Event" },
+      { "dates": "22-23", "reason": "DE" }
     ],
-    "preferred_dates": "Tuesdays, Thursdays"
+    "preferred_dates": ["Tue", "Thu"]
   },
   {
     "rank": "LCP",
     "name": "CHEONG JUN KAI, HARRY",
     "unavailable_dates": [
-      { "dates": "4 - 5 Apr", "reason": "Family Event" },
-      { "dates": "6 - 8 Apr", "reason": "DE" },
-      { "dates": "23 Apr", "reason": "DE" }
+      { "dates": "4-5", "reason": "Family Event" },
+      { "dates": "6-8", "reason": "DE" },
+      { "dates": "23", "reason": "DE" }
     ],
-    "preferred_dates": null
+    "preferred_dates": []
   },
   {
     "rank": "PTE",
     "name": "JEREMIAH FOO JI SHUAN",
     "unavailable_dates": [
-      { "dates": "2 - 5 Apr", "reason": "Good Friday - Easter Sunday" },
-      { "dates": "4 - 10 Apr", "reason": "DE" },
-      { "dates": "11 Apr", "reason": "Uni Interview" },
-      { "dates": "17 Apr", "reason": "MSP" }
+      { "dates": "2-5", "reason": "Good Friday - Easter Sunday" },
+      { "dates": "4-10", "reason": "DE" },
+      { "dates": "11", "reason": "Uni Interview" },
+      { "dates": "17", "reason": "MSP" }
     ],
-    "preferred_dates": "Mondays - Fridays"
+    "preferred_dates": ["Mon", "Tue", "Wed", "Thu", "Fri"]
   },
   {
     "rank": "PTE",
     "name": "CHEONG KAI JIE",
     "unavailable_dates": [
-      { "dates": "1 - 5 Apr", "reason": "Wisdom Tooth" },
-      { "dates": "6 - 9 Apr", "reason": "DE" },
-      { "dates": "10 - 12 Apr", "reason": "Family Event" },
-      { "dates": "17 Apr", "reason": "MSP" },
-      { "dates": "18 - 29 Apr", "reason": "Overseas" },
-      { "dates": "30 Apr", "reason": "ORD" }
+      { "dates": "1-5", "reason": "Wisdom Tooth" },
+      { "dates": "6-9", "reason": "DE" },
+      { "dates": "10-12", "reason": "Family Event" },
+      { "dates": "17", "reason": "MSP" },
+      { "dates": "18-29", "reason": "Overseas" },
+      { "dates": "30", "reason": "ORD" }
     ],
-    "preferred_dates": "Weekdays"
+    "preferred_dates": ["Mon", "Tue", "Wed", "Thu", "Fri"]
   },
   {
     "rank": "PTE",
     "name": "GUO JUNQI LEO",
     "unavailable_dates": [
-      { "dates": "3 - 5 Apr", "reason": "Religious Celebration" },
-      { "dates": "6 - 9 Apr", "reason": "DE" },
-      { "dates": "17 Apr", "reason": "Family Event" },
-      { "dates": "23 Apr", "reason": "DE" },
-      { "dates": "25 - 26 Apr", "reason": "Family Event" }
+      { "dates": "3-5", "reason": "Religious Celebration" },
+      { "dates": "6-9", "reason": "DE" },
+      { "dates": "17", "reason": "Family Event" },
+      { "dates": "23", "reason": "DE" },
+      { "dates": "25-26", "reason": "Family Event" }
     ],
-    "preferred_dates": "Weekdays"
+    "preferred_dates": ["Mon", "Tue", "Wed", "Thu", "Fri"]
   },
   {
     "rank": "PTE",
     "name": "CHONG SIANG NATHAN",
     "unavailable_dates": [
-      { "dates": "3 - 5 Apr", "reason": "OSL" },
-      { "dates": "9 Apr", "reason": "Personal Event" },
-      { "dates": "10 Apr", "reason": "Cohesion" }
+      { "dates": "3-5", "reason": "OSL" },
+      { "dates": "9", "reason": "Personal Event" },
+      { "dates": "10", "reason": "Cohesion" }
     ],
-    "preferred_dates": "Mon - Thu"
+    "preferred_dates": ["Mon", "Tue", "Wed", "Thu"]
   },
   {
     "rank": "PTE",
     "name": "BRYAN MARC MEHAR",
     "unavailable_dates": [
-      { "dates": "6 - 9 Apr", "reason": "DE" },
-      { "dates": "17 Apr", "reason": "MSP" },
-      { "dates": "23 Apr", "reason": "DE" }
+      { "dates": "6-9", "reason": "DE" },
+      { "dates": "17", "reason": "MSP" },
+      { "dates": "23", "reason": "DE" }
     ],
-    "preferred_dates": "Saturdays (excluding unavailable dates)"
+    "preferred_dates": ["Sat"]
   },
   {
     "rank": "PTE",
     "name": "SHYEIKH SALEH HUSSAIN BIN MOHAMMED SULAIMAN",
     "unavailable_dates": [],
-    "preferred_dates": "Tuesdays - Thursdays"
+    "preferred_dates": ["Tue", "Wed", "Thu"]
   }
 ]
