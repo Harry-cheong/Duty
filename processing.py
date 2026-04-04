@@ -233,4 +233,4 @@ for clerk, indicated in clerk_hash.items():
         df.loc[row] = [clerk] + row_data + [len(duty_slots)]
         row += 1
 
-df.to_csv("Availability.csv", index=False)
+df.to_csv("availability.csv", index=False)
