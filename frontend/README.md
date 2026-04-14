@@ -1,6 +1,6 @@
 # Frontend
 
-Minimal Streamlit frontend for the scheduler backend.
+Single-user Streamlit desktop app for the scheduler.
 
 ## Install
 
@@ -17,4 +17,4 @@ pip install -r requirements.txt
 streamlit run app.py
 ```
 
-By default the frontend calls the backend at `http://127.0.0.1:8000`.
+The app runs the scheduling logic in-process. No separate backend service is required.

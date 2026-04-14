@@ -1,45 +1,35 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any
 
 import pandas as pd
-import requests
 import streamlit as st
-import calendar
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 
-st.set_page_config(
-    page_title="Totally Fair Scheduler",
-    page_icon="TF",
-    layout="wide",
+from inputs import (
+    DEFAULT_PERSONNEL_CSV,
+    DEFAULT_POINTS_CSV,
+    availability_for_solver,
+    build_availability_template,
+    build_slot_config,
+    load_clerks,
+    slot_labels_from_config,
+)
+from scheduler_core import (
+    SchedulerConfig,
+    generate_reserve_schedules_from_inputs,
+    generate_schedule_from_inputs,
 )
 
-DEFAULT_BACKEND_URL = "http://127.0.0.1:8000"
+st.set_page_config(page_title="Totally Fair Scheduler", page_icon="TF", layout="wide")
 
-
-def post_json(base_url: str, path: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    response = requests.post(
-        f"{base_url.rstrip('/')}{path}",
-        json=payload,
-        timeout=60,
-    )
-    response.raise_for_status()
-    return response.json()
-
-
-def get_json(base_url: str, path: str) -> Dict[str, Any]:
-    response = requests.get(f"{base_url.rstrip('/')}{path}", timeout=10)
-    response.raise_for_status()
-    return response.json()
-
-
-def dataframe_from_rows(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+def dataframe_from_rows(rows: list[dict[str, Any]]) -> pd.DataFrame:
     if not rows:
         return pd.DataFrame()
     return pd.DataFrame(rows)
 
-
-def render_result(result: Dict[str, Any], heading: str) -> None:
+def render_result(result: dict[str, Any], heading: str) -> None:
     st.subheader(heading)
 
     metric_columns = st.columns(4)
@@ -75,22 +65,11 @@ def render_result(result: Dict[str, Any], heading: str) -> None:
             st.dataframe(compliance_df, use_container_width=True, hide_index=True)
 
 with st.sidebar:
-    st.header("Backend")
-    backend_url = st.text_input("Backend URL", value=DEFAULT_BACKEND_URL)
-
-    health_clicked = st.button("Check Backend", use_container_width=True)
-    if health_clicked:
-        try:
-            health = get_json(backend_url, "/health")
-            st.success(f"Backend status: {health['status']}")
-        except requests.RequestException as exc:
-            st.error(f"Backend unavailable: {exc}")
-
     st.header("Inputs")
     year = st.number_input("Year", min_value=2000, max_value=2100, value=2026, step=1)
     month = st.number_input("Month", min_value=1, max_value=12, value=4, step=1)
-    availability_csv = st.text_input("Availability CSV", value="../Availability.csv")
-    points_csv = st.text_input("Points CSV", value="../march_points.csv")
+    personnel_csv = st.text_input("Personnel CSV", value=DEFAULT_PERSONNEL_CSV)
+    points_csv = st.text_input("Points CSV", value=DEFAULT_POINTS_CSV)
     min_gap_days = st.slider("Min Gap Days", min_value=1, max_value=31, value=7)
     time_limit_seconds = st.slider("Solver Time Limit", min_value=1, max_value=120, value=10)
     use_random_seed = st.toggle("Use Fixed Random Seed", value=True)
@@ -101,51 +80,40 @@ with st.sidebar:
 st.title("Slot Configurations")
 st.caption("Set duty points assigned per day")
 
-_, last_day = calendar.monthrange(year, month)
-days = pd.date_range(f"{year}-{month:02d}-01", periods=last_day)
-day_strings = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-df = pd.DataFrame(
-    {
-        "Date":[day.strftime("%d/%m/%Y") for day in days],
-        "Day":[day_strings[pd.to_datetime(dateObj).weekday()] for dateObj in days],
-        "Slot 1": [True for _ in range(len(days))],
-        "Slot 2": [True if pd.to_datetime(dateObj).weekday() >= 5 else False for dateObj in days]
-    },
-)
+slot_config_key = f"slot_config_{year}_{month}"
+if slot_config_key not in st.session_state:
+    st.session_state[slot_config_key] = build_slot_config(int(year), int(month))
+
+
 def highlight_weekends(row, color="#D3D3D3"):
     if row.Day in ["Sat", "Sun"]:
-        return [f'background-color: {color}'] * len(row)  # * len(row) applies to ALL columns
-    return [''] * len(row)
+        return [f"background-color: {color}"] * len(row)
+    return [""] * len(row)
 
-styled_df = df.style.apply(highlight_weekends, color="#2C3A4A", axis=1)
+styled_df = st.session_state[slot_config_key].style.apply(highlight_weekends, color="#2C3A4A", axis=1)
 edited_df = st.data_editor(styled_df, disabled=["Date", "Day"])
+st.session_state[slot_config_key] = edited_df
 
-# Collect user input and generate slots
-slots = []
-warning_slots = []
-for i, row in edited_df.iterrows():
-    date = row["Date"]
-    slot1 = row["Slot 1"]
-    slot2 = row["Slot 2"]
-    if slot1 and slot2:
-        slots.append(date + " AM")
-        slots.append(date + " PM")
-    elif slot1:
-        slots.append(date)
-    else:
-        warning_slots.append(date)
-if warning_slots: st.markdown(f"No Slot or Invalid Slot Combination on the following days: {' '.join(warning_slots)}")
+slots, warning_slots = slot_labels_from_config(edited_df)
+if warning_slots:
+    st.markdown(f"No Slot or Invalid Slot Combination on the following days: {' '.join(warning_slots)}")
 
 ### Availability and Preference ###
 st.title("Availability and Preferences")
 st.caption("Indicate the availability and preferences of every clerk")
-clerks_df = pd.read_csv("../Personnel List.csv")
 
-availability_df = pd.DataFrame({
-    'No': range(1, len(clerks_df) + 1), 
-    'Name': clerks_df['Name'],
-    **{slot: 1 for slot in slots}
-})
+try:
+    clerks_df = load_clerks(personnel_csv)
+except FileNotFoundError:
+    st.error(f"Personnel CSV not found: {Path(personnel_csv).resolve()}")
+    st.stop()
+except Exception as exc:
+    st.error(f"Unable to load personnel CSV: {exc}")
+    st.stop()
+
+expected_columns = ["No", "Name", *slots]
+availability_df = build_availability_template(clerks_df, slots)
+availability_grid_key = f"availability_grid_{year}_{month}_{len(slots)}_{Path(personnel_csv).resolve()}"
 
 cell_style_js = JsCode("""
     function(params) {
@@ -181,65 +149,71 @@ gb.configure_grid_options(
     rowNumbers = True # shows row index on the left
 )
 
-AgGrid(
+grid_response = AgGrid(
     availability_df,
     gridOptions=gb.build(),
     allow_unsafe_jscode=True,
     theme='streamlit',
     fit_columns_on_grid_load=False,
-    height=(len(availability_df) + 1) * 35 + 3,
+    height=min((len(availability_df) + 1) * 35 + 3, 600),
+    key=availability_grid_key,
 )
+edited_availability_df = pd.DataFrame(grid_response["data"])[expected_columns]
 
 ### Scheduler ###
 st.title("Totally Fair Scheduler")
-st.caption("Minimal UI for the FastAPI scheduling backend.")
+st.caption("Single-process desktop scheduler.")
 
-payload = {
-    "year": int(year),
-    "month": int(month),
-    "availability_csv": availability_csv,
-    "points_csv": points_csv,
-    "min_gap_days": int(min_gap_days),
-    "time_limit_seconds": int(time_limit_seconds),
-    "use_random_seed": use_random_seed,
-    "random_seed": int(random_seed) if use_random_seed else None,
-}
+solver_config = SchedulerConfig(
+    min_gap_days=int(min_gap_days),
+    time_limit_seconds=int(time_limit_seconds),
+    use_random_seed=use_random_seed,
+    random_seed=int(random_seed) if use_random_seed else 42,
+)
+
+try:
+    solver_availability_df = availability_for_solver(edited_availability_df, slots)
+except Exception as exc:
+    st.error(f"Invalid availability grid data: {exc}")
+    st.stop()
 
 primary_col, reserve_col = st.columns(2)
 generate_primary = primary_col.button("Generate Primary Schedule", use_container_width=True, type="primary")
 generate_reserves = reserve_col.button("Generate With Reserves", use_container_width=True)
-
 
 if "primary_result" not in st.session_state:
     st.session_state.primary_result = None
 if "reserve_results" not in st.session_state:
     st.session_state.reserve_results = None
 
-
 if generate_primary:
     try:
         with st.spinner("Generating primary schedule..."):
-            st.session_state.primary_result = post_json(backend_url, "/schedule", payload)
+            st.session_state.primary_result = generate_schedule_from_inputs(
+                availability_df=solver_availability_df,
+                points_csv=points_csv,
+                config=solver_config,
+            ).to_dict()
             st.session_state.reserve_results = None
-    except requests.HTTPError as exc:
-        detail = exc.response.text if exc.response is not None else str(exc)
-        st.error(f"Request failed: {detail}")
-    except requests.RequestException as exc:
-        st.error(f"Backend request failed: {exc}")
-
+    except Exception as exc:
+        st.error(f"Schedule generation failed: {exc}")
 
 if generate_reserves:
-    reserve_payload = {**payload, "reserve_rounds": int(reserve_rounds)}
     try:
         with st.spinner("Generating primary and reserve schedules..."):
-            st.session_state.reserve_results = post_json(backend_url, "/schedule/reserves", reserve_payload)
+            reserve_response = generate_reserve_schedules_from_inputs(
+                availability_df=solver_availability_df,
+                points_csv=points_csv,
+                config=solver_config,
+                reserve_rounds=int(reserve_rounds),
+            )
+            st.session_state.reserve_results = {
+                "primary": reserve_response.primary.to_dict(),
+                "reserves": [reserve.to_dict() for reserve in reserve_response.reserves],
+            }
             st.session_state.primary_result = st.session_state.reserve_results["primary"]
-    except requests.HTTPError as exc:
-        detail = exc.response.text if exc.response is not None else str(exc)
-        st.error(f"Request failed: {detail}")
-    except requests.RequestException as exc:
-        st.error(f"Backend request failed: {exc}")
-
+    except Exception as exc:
+        st.error(f"Schedule generation failed: {exc}")
 
 if st.session_state.primary_result:
     render_result(st.session_state.primary_result, "Primary Schedule")
@@ -251,3 +225,17 @@ if st.session_state.reserve_results and st.session_state.reserve_results["reserv
     st.divider()
     for index, reserve_result in enumerate(st.session_state.reserve_results["reserves"], start=1):
         render_result(reserve_result, f"Reserve {index}")
+
+@st.cache_data
+def convert_for_download(df):
+    return df.to_csv(index=False).encode("utf-8")
+
+csv = convert_for_download(edited_availability_df)
+
+st.download_button(
+    label="Download CSV",
+    data=csv,
+    file_name="data.csv",
+    mime="text/csv",
+    icon=":material/download:",
+)
