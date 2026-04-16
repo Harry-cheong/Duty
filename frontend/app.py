@@ -8,11 +8,14 @@ import streamlit as st
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 
 from inputs import (
+    DEFAULT_AVAILABILITY_INPUT_CSV,
+    DEFAULT_AVAILABILITY_OUTPUT_CSV,
     DEFAULT_PERSONNEL_CSV,
     DEFAULT_POINTS_CSV,
     availability_for_solver,
-    build_availability_template,
+    build_availability_from_input,
     build_slot_config,
+    grid_from_normalized_availability,
     load_clerks,
     slot_labels_from_config,
 )
@@ -70,6 +73,7 @@ with st.sidebar:
     month = st.number_input("Month", min_value=1, max_value=12, value=4, step=1)
     personnel_csv = st.text_input("Personnel CSV", value=DEFAULT_PERSONNEL_CSV)
     points_csv = st.text_input("Points CSV", value=DEFAULT_POINTS_CSV)
+    availability_input_csv = st.text_input("Availability Input CSV", value=DEFAULT_AVAILABILITY_INPUT_CSV)
     min_gap_days = st.slider("Min Gap Days", min_value=1, max_value=31, value=7)
     time_limit_seconds = st.slider("Solver Time Limit", min_value=1, max_value=120, value=10)
     use_random_seed = st.toggle("Use Fixed Random Seed", value=True)
@@ -112,8 +116,27 @@ except Exception as exc:
     st.stop()
 
 expected_columns = ["No", "Name", *slots]
-availability_df = build_availability_template(clerks_df, slots)
-availability_grid_key = f"availability_grid_{year}_{month}_{len(slots)}_{Path(personnel_csv).resolve()}"
+try:
+    normalized_availability_df = build_availability_from_input(
+        clerks_df=clerks_df,
+        slots=slots,
+        availability_input_csv=availability_input_csv,
+        output_csv=DEFAULT_AVAILABILITY_OUTPUT_CSV,
+        year=int(year),
+        month=int(month),
+    )
+except FileNotFoundError:
+    st.error(f"Availability input CSV not found: {Path(availability_input_csv).resolve()}")
+    st.stop()
+except Exception as exc:
+    st.error(f"Unable to load availability input CSV: {exc}")
+    st.stop()
+
+availability_df = grid_from_normalized_availability(normalized_availability_df, slots)
+availability_grid_key = (
+    f"availability_grid_{year}_{month}_{len(slots)}_"
+    f"{Path(personnel_csv).resolve()}_{Path(availability_input_csv).resolve()}"
+)
 
 cell_style_js = JsCode("""
     function(params) {
@@ -192,6 +215,7 @@ if generate_primary:
             st.session_state.primary_result = generate_schedule_from_inputs(
                 availability_df=solver_availability_df,
                 points_csv=points_csv,
+                month=int(month),
                 config=solver_config,
             ).to_dict()
             st.session_state.reserve_results = None
@@ -204,6 +228,7 @@ if generate_reserves:
             reserve_response = generate_reserve_schedules_from_inputs(
                 availability_df=solver_availability_df,
                 points_csv=points_csv,
+                month=int(month),
                 config=solver_config,
                 reserve_rounds=int(reserve_rounds),
             )

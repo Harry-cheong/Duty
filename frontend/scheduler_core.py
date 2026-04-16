@@ -372,9 +372,10 @@ def apply_reserve_round(planning_table: pd.DataFrame, schedule_rows: list[Schedu
 def generate_schedule_from_inputs(
     availability_df: pd.DataFrame,
     points_csv: str,
+    month: int,
     config: SchedulerConfig,
 ) -> ScheduleResult:
-    points_df = load_points(points_csv)
+    points_df = load_points(points_csv, month)
     result, _ = generate_schedule(availability_df=availability_df, points_df=points_df, config=config)
     return result
 
@@ -382,10 +383,11 @@ def generate_schedule_from_inputs(
 def generate_reserve_schedules_from_inputs(
     availability_df: pd.DataFrame,
     points_csv: str,
+    month: int,
     config: SchedulerConfig,
     reserve_rounds: int,
 ) -> ReserveScheduleResponse:
-    points_df = load_points(points_csv)
+    points_df = load_points(points_csv, month)
     primary, planning_table = generate_schedule(availability_df=availability_df, points_df=points_df, config=config)
 
     reserves: list[ScheduleResult] = []
