@@ -4,6 +4,7 @@ import calendar
 import re
 from pathlib import Path
 
+import holidays
 import pandas as pd
 
 DEFAULT_POINTS_CSV = "../dutypts.csv"
@@ -25,16 +26,27 @@ MONTH_COLUMN_NAMES = {
     12: "DEC",
 }
 
+
+def _singapore_public_holiday_lookup(year: int) -> dict[object, str]:
+    return {
+        holiday_date: str(name)
+        for holiday_date, name in holidays.country_holidays("SG", years=year).items()
+    }
+
+
 def build_slot_config(year: int, month: int) -> pd.DataFrame:
     _, last_day = calendar.monthrange(year, month)
     days = pd.date_range(f"{year}-{month:02d}-01", periods=last_day)
     day_strings = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    public_holidays = _singapore_public_holiday_lookup(year)
+    holiday_labels = [public_holidays.get(day.date(), "") for day in days]
     return pd.DataFrame(
         {
             "Date": [day.strftime("%d/%m/%Y") for day in days],
             "Day": [day_strings[day.weekday()] for day in days],
+            "Holiday": [f"PH: {label}" if label else "" for label in holiday_labels],
             "Slot 1": [True for _ in range(len(days))],
-            "Slot 2": [day.weekday() >= 5 for day in days],
+            "Slot 2": [day.weekday() >= 5 or bool(label) for day, label in zip(days, holiday_labels)],
         },
     )
 

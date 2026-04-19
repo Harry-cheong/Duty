@@ -92,20 +92,24 @@ with st.sidebar:
 
 ### Configurations ###
 st.title("Slot Configurations")
-st.caption("Set duty points assigned per day")
+st.caption("Set duty points assigned per day. Weekends and Singapore public holidays default to two slots.")
 
 slot_config_key = f"slot_config_{year}_{month}"
 if slot_config_key not in st.session_state:
     st.session_state[slot_config_key] = build_slot_config(int(year), int(month))
 
 
-def highlight_weekends(row, color="#D3D3D3"):
+def highlight_special_days(row, weekend_color="#2C3A4A", holiday_color="#244B36"):
+    holiday_label = row.get("Holiday", "")
+    if pd.notna(holiday_label) and str(holiday_label).strip():
+        return [f"background-color: {holiday_color}"] * len(row)
     if row.Day in ["Sat", "Sun"]:
-        return [f"background-color: {color}"] * len(row)
+        return [f"background-color: {weekend_color}"] * len(row)
     return [""] * len(row)
 
-styled_df = st.session_state[slot_config_key].style.apply(highlight_weekends, color="#2C3A4A", axis=1)
-edited_df = st.data_editor(styled_df, disabled=["Date", "Day"])
+styled_df = st.session_state[slot_config_key].style.apply(highlight_special_days, axis=1)
+edited_df = st.data_editor(styled_df, disabled=["Date", "Day", "Holiday"])
+st.caption("`Holiday` rows are Singapore public holidays (PH).")
 
 slots, warning_slots = slot_labels_from_config(edited_df)
 if warning_slots:
