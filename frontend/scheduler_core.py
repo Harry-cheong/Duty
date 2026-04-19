@@ -15,6 +15,7 @@ from models import ComplianceRow, ReserveScheduleResponse, ScheduleResult, Sched
 AVAILABILITY_COLUMN = "Availability"
 NAME_COLUMN = "Name"
 DUTY_COLUMN = "Duty"
+OBLIGATION_COLUMN = "Obligation"
 PROJECTED_COLUMN = "Projected"
 
 
@@ -54,7 +55,7 @@ def _prepare_planning_table(
         planning_table = planning_table[~planning_table[NAME_COLUMN].isin(unmatched_clerks)].copy()
 
     planning_table = planning_table.merge(
-        points_df[[NAME_COLUMN, DUTY_COLUMN]],
+        points_df,
         on=NAME_COLUMN,
         how="left",
         sort=False,
@@ -65,25 +66,57 @@ def _prepare_planning_table(
 
 
 def _project_duties(planning_table: pd.DataFrame, duty_target: int, rng: random.Random) -> pd.DataFrame:
-    current_duty = planning_table[DUTY_COLUMN].fillna(0).astype(float).to_numpy()
-    planning_table[PROJECTED_COLUMN] = [1 if duty < 4.0 else 0 for duty in current_duty]
-
-    assigned = int(planning_table[PROJECTED_COLUMN].sum())
-    remaining = max(duty_target - assigned, 0)
+    planning_table[PROJECTED_COLUMN] = 0
     heap = [
-        (-(4 - (1 + duty)), rng.random(), name)
-        for duty, name in zip(current_duty.tolist(), planning_table[NAME_COLUMN].tolist())
+        (
+            -(float(row[OBLIGATION_COLUMN]) - float(row[DUTY_COLUMN])),
+            rng.random(),
+            row[NAME_COLUMN],
+        )
+        for _, row in planning_table.iterrows()
     ]
     heapq.heapify(heap)
 
-    for _ in range(remaining):
+    for _ in range(duty_target):
         if not heap:
             break
         _, _, name = heapq.heappop(heap)
-        planning_table.loc[planning_table[NAME_COLUMN] == name, PROJECTED_COLUMN] += 1
+        row_index = planning_table.index[planning_table[NAME_COLUMN] == name].item()
+        planning_table.loc[row_index, PROJECTED_COLUMN] += 1
+        row = planning_table.loc[row_index]
+        remaining_gap = (
+            float(row[OBLIGATION_COLUMN])
+            - float(row[DUTY_COLUMN])
+            - float(row[PROJECTED_COLUMN])
+        )
+        heapq.heappush(heap, (-remaining_gap, rng.random(), name))
 
     planning_table["Monthly Duty Points"] = 0
     return planning_table
+
+
+def project_duties_preview(
+    availability_df: pd.DataFrame,
+    points_df: pd.DataFrame,
+    config: SchedulerConfig,
+) -> pd.DataFrame:
+    planning_table, _, _, _ = _prepare_planning_table(
+        availability_df=availability_df,
+        points_df=points_df,
+    )
+    rng = _reset_rng(config)
+    planning_table = _project_duties(planning_table, len(_slot_columns(availability_df)), rng)
+    historical_columns = [
+        column
+        for column in points_df.columns
+        if column not in {NAME_COLUMN, DUTY_COLUMN, OBLIGATION_COLUMN}
+    ]
+    preview_df = planning_table[
+        [NAME_COLUMN, *historical_columns, DUTY_COLUMN, OBLIGATION_COLUMN, PROJECTED_COLUMN]
+    ].copy()
+    preview_df["Total"] = preview_df[DUTY_COLUMN] + preview_df[PROJECTED_COLUMN]
+    preview_df["Difference"] = preview_df["Total"] - preview_df[OBLIGATION_COLUMN]
+    return preview_df
 
 
 def _parse_slot_date(slot_label: str) -> pd.Timestamp:
@@ -373,9 +406,10 @@ def generate_schedule_from_inputs(
     availability_df: pd.DataFrame,
     points_csv: str,
     month: int,
+    monthly_obligation: float,
     config: SchedulerConfig,
 ) -> ScheduleResult:
-    points_df = load_points(points_csv, month)
+    points_df = load_points(points_csv, month, monthly_obligation)
     result, _ = generate_schedule(availability_df=availability_df, points_df=points_df, config=config)
     return result
 
@@ -384,10 +418,11 @@ def generate_reserve_schedules_from_inputs(
     availability_df: pd.DataFrame,
     points_csv: str,
     month: int,
+    monthly_obligation: float,
     config: SchedulerConfig,
     reserve_rounds: int,
 ) -> ReserveScheduleResponse:
-    points_df = load_points(points_csv, month)
+    points_df = load_points(points_csv, month, monthly_obligation)
     primary, planning_table = generate_schedule(availability_df=availability_df, points_df=points_df, config=config)
 
     reserves: list[ScheduleResult] = []

@@ -55,6 +55,7 @@ def slot_labels_from_config(config_df: pd.DataFrame) -> tuple[list[str], list[st
             warning_slots.append(date)
     return slots, warning_slots
 
+
 def load_clerks(personnel_csv: str = DEFAULT_PERSONNEL_CSV) -> pd.DataFrame:
     return pd.read_csv(Path(personnel_csv))
 
@@ -230,24 +231,35 @@ def availability_for_solver(grid_df: pd.DataFrame, slots: list[str]) -> pd.DataF
     availability_df["Availability"] = (availability_df[slots] > 0).sum(axis=1)
     return availability_df[["Name", *slots, "Availability"]]
 
-def load_points(points_csv: str, month: int) -> pd.DataFrame:
+def load_points(points_csv: str, month: int, monthly_obligation: float) -> pd.DataFrame:
     points_df = pd.read_csv(Path(points_csv))
     if "Name" not in points_df.columns:
         raise ValueError("Points CSV must include a 'Name' column.")
 
-    if "Duty" in points_df.columns:
-        return points_df[["Name", "Duty"]].copy()
-
-    month_column = MONTH_COLUMN_NAMES.get(int(month))
-    if month_column is None:
+    selected_month = int(month)
+    previous_months = [
+        MONTH_COLUMN_NAMES.get(((selected_month - offset - 1) % 12) + 1)
+        for offset in range(1, 3)
+    ]
+    if any(month_name is None for month_name in previous_months):
         raise ValueError(f"Unsupported month value: {month}")
-    if month_column not in points_df.columns:
+
+    missing_months = [month_name for month_name in previous_months if month_name not in points_df.columns]
+    if missing_months:
         available_columns = ", ".join(str(column) for column in points_df.columns)
         raise ValueError(
-            f"Points CSV is missing the '{month_column}' column for month {month}. "
+            f"{', '.join(missing_months)} data is not found. "
             f"Available columns: {available_columns}"
         )
 
-    normalized_df = points_df[["Name", month_column]].copy()
-    normalized_df = normalized_df.rename(columns={month_column: "Duty"})
-    return normalized_df
+    historical_points = points_df[previous_months].apply(pd.to_numeric, errors="coerce")
+    cumulative_points_df = pd.DataFrame(
+        {
+            "Name": points_df["Name"].astype(str),
+            **{month_name: historical_points[month_name] for month_name in previous_months},
+            "Duty": historical_points.fillna(0).sum(axis=1),
+            "Obligation": monthly_obligation * (historical_points.notna().sum(axis=1) + 1),
+        }
+    )
+
+    return cumulative_points_df

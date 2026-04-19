@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,17 +13,20 @@ from inputs import (
     DEFAULT_AVAILABILITY_OUTPUT_CSV,
     DEFAULT_PERSONNEL_CSV,
     DEFAULT_POINTS_CSV,
+    MONTH_COLUMN_NAMES,
     availability_for_solver,
     build_availability_from_input,
     build_slot_config,
     grid_from_normalized_availability,
     load_clerks,
     slot_labels_from_config,
+    load_points,
 )
 from scheduler_core import (
     SchedulerConfig,
     generate_reserve_schedules_from_inputs,
     generate_schedule_from_inputs,
+    project_duties_preview,
 )
 
 st.set_page_config(page_title="Totally Fair Scheduler", page_icon="TF", layout="wide")
@@ -67,10 +71,16 @@ def render_result(result: dict[str, Any], heading: str) -> None:
         else:
             st.dataframe(compliance_df, use_container_width=True, hide_index=True)
 
+# Defaults
+today = datetime.datetime.today()
+default_year = today.year if today.month < 12 else today.year + 1
+default_month = today.month + 1 if today.month < 12 else 1
+
 with st.sidebar:
     st.header("Inputs")
-    year = st.number_input("Year", min_value=2000, max_value=2100, value=2026, step=1)
-    month = st.number_input("Month", min_value=1, max_value=12, value=4, step=1)
+    year = st.number_input("Year", min_value=2000, max_value=2100, value=default_year, step=1)
+    month = st.number_input("Month", min_value=1, max_value=12, value=default_month, step=1)
+    monthly_obligation = st.number_input("Duty Per Month", value=1.33)
     personnel_csv = st.text_input("Personnel CSV", value=DEFAULT_PERSONNEL_CSV)
     points_csv = st.text_input("Points CSV", value=DEFAULT_POINTS_CSV)
     availability_input_csv = st.text_input("Availability Input CSV", value=DEFAULT_AVAILABILITY_INPUT_CSV)
@@ -96,11 +106,12 @@ def highlight_weekends(row, color="#D3D3D3"):
 
 styled_df = st.session_state[slot_config_key].style.apply(highlight_weekends, color="#2C3A4A", axis=1)
 edited_df = st.data_editor(styled_df, disabled=["Date", "Day"])
-st.session_state[slot_config_key] = edited_df
 
 slots, warning_slots = slot_labels_from_config(edited_df)
 if warning_slots:
     st.markdown(f"No Slot or Invalid Slot Combination on the following days: {' '.join(warning_slots)}")
+
+st.markdown(f"Assigned Duty Points: {edited_df['Slot 1'].sum() + edited_df['Slot 2'].sum()}")
 
 ### Availability and Preference ###
 st.title("Availability and Preferences")
@@ -183,9 +194,9 @@ grid_response = AgGrid(
 )
 edited_availability_df = pd.DataFrame(grid_response["data"])[expected_columns]
 
-### Scheduler ###
-st.title("Totally Fair Scheduler")
-st.caption("Single-process desktop scheduler.")
+### Display Duty Points ###
+st.title("Duty Point Management")
+st.caption("Tabulate duty points done in the last 2 months and project next month's duty points")
 
 solver_config = SchedulerConfig(
     min_gap_days=int(min_gap_days),
@@ -199,6 +210,45 @@ try:
 except Exception as exc:
     st.error(f"Invalid availability grid data: {exc}")
     st.stop()
+
+try:
+    points_df = load_points(
+        points_csv=points_csv,
+        month=int(month),
+        monthly_obligation=float(monthly_obligation),
+    )
+    projected_points_df = project_duties_preview(
+        availability_df=solver_availability_df,
+        points_df=points_df,
+        config=solver_config,
+    )
+except FileNotFoundError:
+    st.error(f"Points CSV not found: {Path(points_csv).resolve()}")
+    st.stop()
+except Exception as exc:
+    st.error(f"Unable to load duty points: {exc}")
+    st.stop()
+
+selected_month_name = MONTH_COLUMN_NAMES[int(month)]
+display_points_df = projected_points_df.rename(columns={"Projected": selected_month_name})
+display_columns = [
+    "Name",
+    *[
+        column
+        for column in display_points_df.columns
+        if column not in {"Name", "Duty", "Obligation", selected_month_name, "Total", "Difference"}
+    ],
+    selected_month_name,
+    "Total",
+    "Obligation",
+]
+st.data_editor(display_points_df[display_columns], use_container_width=True, hide_index=True, disabled=[col for col in display_columns if col != selected_month_name])
+st.markdown(f"Projected: {display_points_df[selected_month_name].sum()}")
+st.markdown(f"Required: {edited_df['Slot 1'].sum() + edited_df['Slot 2'].sum()}")
+
+### Scheduler ###
+st.title("Totally Fair Scheduler")
+st.caption("Single-process desktop scheduler.")
 
 primary_col, reserve_col = st.columns(2)
 generate_primary = primary_col.button("Generate Primary Schedule", use_container_width=True, type="primary")
@@ -216,6 +266,7 @@ if generate_primary:
                 availability_df=solver_availability_df,
                 points_csv=points_csv,
                 month=int(month),
+                monthly_obligation=float(monthly_obligation),
                 config=solver_config,
             ).to_dict()
             st.session_state.reserve_results = None
@@ -229,6 +280,7 @@ if generate_reserves:
                 availability_df=solver_availability_df,
                 points_csv=points_csv,
                 month=int(month),
+                monthly_obligation=float(monthly_obligation),
                 config=solver_config,
                 reserve_rounds=int(reserve_rounds),
             )
