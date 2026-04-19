@@ -9,6 +9,8 @@ class ScheduleRow:
     date: str
     assigned_clerk: str
     weekend: bool
+    public_holiday: bool
+    holiday: str
 
 
 @dataclass

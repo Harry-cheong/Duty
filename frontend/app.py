@@ -36,6 +36,133 @@ def dataframe_from_rows(rows: list[dict[str, Any]]) -> pd.DataFrame:
         return pd.DataFrame()
     return pd.DataFrame(rows)
 
+
+def with_visual_index(df: pd.DataFrame) -> pd.DataFrame:
+    indexed_df = df.copy()
+    indexed_df.index = pd.RangeIndex(start=1, stop=len(indexed_df) + 1, step=1)
+    return indexed_df
+
+
+def table_dimensions_caption(df: pd.DataFrame) -> str:
+    return f"{df.shape[1]} columns x {df.shape[0]} rows"
+
+
+def render_dataframe_with_meta(df: pd.DataFrame) -> None:
+    display_df = with_visual_index(df)
+    st.dataframe(display_df, use_container_width=True, hide_index=False)
+    st.caption(table_dimensions_caption(df))
+
+
+def render_data_editor_with_meta(df: pd.DataFrame, **kwargs: Any) -> pd.DataFrame:
+    display_df = with_visual_index(df)
+    disabled_columns = list(kwargs.pop("disabled", []))
+    editor_df = st.data_editor(display_df, disabled=["_index", *disabled_columns], hide_index=False, **kwargs)
+    st.caption(table_dimensions_caption(df))
+    return pd.DataFrame(editor_df).reset_index(drop=True)
+
+
+def build_availability_mismatch_table(
+    availability_names: list[str],
+    points_names: list[str],
+) -> pd.DataFrame:
+    rows: list[dict[str, str]] = []
+    points_lookup = set(points_names)
+    for availability_name in availability_names:
+        if availability_name in points_lookup:
+            continue
+        rows.append(
+            {
+                "Availability Name": availability_name,
+                "Match To DutyPts Name": "",
+                "Disable": False,
+            }
+        )
+
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "Availability Name",
+            "Match To DutyPts Name",
+            "Disable",
+        ],
+    )
+
+
+def build_points_mismatch_table(
+    availability_names: list[str],
+    points_names: list[str],
+) -> pd.DataFrame:
+    rows: list[dict[str, str]] = []
+    availability_lookup = set(availability_names)
+    for points_name in points_names:
+        if points_name in availability_lookup:
+            continue
+        rows.append(
+            {
+                "DutyPts Name": points_name,
+                "Match To Availability Name": "",
+                "Disable": False,
+            }
+        )
+
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "DutyPts Name",
+            "Match To Availability Name",
+            "Disable",
+        ],
+    )
+
+
+def apply_name_corrections(
+    availability_df: pd.DataFrame,
+    points_df: pd.DataFrame,
+    availability_review_df: pd.DataFrame,
+    points_review_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    corrected_availability_df = availability_df.copy()
+    corrected_points_df = points_df.copy()
+    points_renames: dict[str, str] = {}
+    disabled_availability_names: set[str] = set()
+    disabled_points_names: set[str] = set()
+
+    for _, row in availability_review_df.iterrows():
+        availability_name = str(row.get("Availability Name", "")).strip()
+        matched_dutypts_name = str(row.get("Match To DutyPts Name", "")).strip()
+        disabled = bool(row.get("Disable", False))
+        if not availability_name:
+            continue
+        if disabled:
+            disabled_availability_names.add(availability_name)
+            continue
+        if matched_dutypts_name:
+            points_renames[matched_dutypts_name] = availability_name
+
+    for _, row in points_review_df.iterrows():
+        dutypts_name = str(row.get("DutyPts Name", "")).strip()
+        matched_availability_name = str(row.get("Match To Availability Name", "")).strip()
+        disabled = bool(row.get("Disable", False))
+        if not dutypts_name:
+            continue
+        if disabled:
+            disabled_points_names.add(dutypts_name)
+            continue
+        if matched_availability_name:
+            points_renames[dutypts_name] = matched_availability_name
+
+    corrected_availability_df["Name"] = corrected_availability_df["Name"].astype(str).str.strip()
+    corrected_availability_df = corrected_availability_df[
+        ~corrected_availability_df["Name"].isin(disabled_availability_names)
+    ].copy()
+    corrected_points_df["Name"] = corrected_points_df["Name"].astype(str).str.strip().map(
+        lambda name: points_renames.get(name, name)
+    )
+    corrected_points_df = corrected_points_df[
+        ~corrected_points_df["Name"].isin(disabled_points_names)
+    ].copy()
+    return corrected_availability_df, corrected_points_df
+
 def render_result(result: dict[str, Any], heading: str) -> None:
     st.subheader(heading)
 
@@ -54,22 +181,40 @@ def render_result(result: dict[str, Any], heading: str) -> None:
         st.caption(" | ".join(notes))
 
     schedule_df = dataframe_from_rows(result["schedule"])
+    if not schedule_df.empty:
+        schedule_df = schedule_df.rename(
+            columns={
+                "date": "Date",
+                "assigned_clerk": "Assigned Clerk",
+                "holiday": "Holiday",
+            }
+        )
+        if "weekend" in schedule_df.columns:
+            schedule_df["Weekend"] = schedule_df["weekend"].map(lambda value: "✓" if value else "")
+        if "public_holiday" in schedule_df.columns:
+            schedule_df["PH"] = schedule_df["public_holiday"].map(lambda value: "✓" if value else "")
+        display_columns = [
+            column
+            for column in ["Date", "Assigned Clerk", "Weekend", "PH", "Holiday"]
+            if column in schedule_df.columns
+        ]
+        schedule_df = schedule_df[display_columns]
     summary_df = dataframe_from_rows(result["summary"])
     compliance_df = dataframe_from_rows(result["compliance"])
 
     tab_schedule, tab_summary, tab_compliance = st.tabs(["Schedule", "Summary", "Compliance"])
 
     with tab_schedule:
-        st.dataframe(schedule_df, use_container_width=True, hide_index=True)
+        render_dataframe_with_meta(schedule_df)
 
     with tab_summary:
-        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+        render_dataframe_with_meta(summary_df)
 
     with tab_compliance:
         if compliance_df.empty:
             st.info("No compliance rows returned.")
         else:
-            st.dataframe(compliance_df, use_container_width=True, hide_index=True)
+            render_dataframe_with_meta(compliance_df)
 
 # Defaults
 today = datetime.datetime.today()
@@ -107,9 +252,12 @@ def highlight_special_days(row, weekend_color="#2C3A4A", holiday_color="#244B36"
         return [f"background-color: {weekend_color}"] * len(row)
     return [""] * len(row)
 
-styled_df = st.session_state[slot_config_key].style.apply(highlight_special_days, axis=1)
-edited_df = st.data_editor(styled_df, disabled=["Date", "Day", "Holiday"])
+slot_config_display_df = with_visual_index(st.session_state[slot_config_key])
+styled_df = slot_config_display_df.style.apply(highlight_special_days, axis=1)
+edited_df = st.data_editor(styled_df, disabled=["_index", "Date", "Day", "Holiday"], hide_index=False)
+edited_df = pd.DataFrame(edited_df).reset_index(drop=True)
 st.caption("`Holiday` rows are Singapore public holidays (PH).")
+st.caption(table_dimensions_caption(st.session_state[slot_config_key]))
 
 slots, warning_slots = slot_labels_from_config(edited_df)
 if warning_slots:
@@ -196,6 +344,7 @@ grid_response = AgGrid(
     height=min((len(availability_df) + 1) * 35 + 3, 600),
     key=availability_grid_key,
 )
+st.caption(table_dimensions_caption(availability_df))
 edited_availability_df = pd.DataFrame(grid_response["data"])[expected_columns]
 
 ### Display Duty Points ###
@@ -221,16 +370,179 @@ try:
         month=int(month),
         monthly_obligation=float(monthly_obligation),
     )
-    projected_points_df = project_duties_preview(
-        availability_df=solver_availability_df,
-        points_df=points_df,
-        config=solver_config,
-    )
 except FileNotFoundError:
     st.error(f"Points CSV not found: {Path(points_csv).resolve()}")
     st.stop()
 except Exception as exc:
     st.error(f"Unable to load duty points: {exc}")
+    st.stop()
+
+st.header("Name Review")
+st.caption("Review clerk-name mismatches between Availability and dutypts. Corrections apply only in memory for this app session.")
+
+availability_names = solver_availability_df["Name"].astype(str).str.strip().tolist()
+points_names = points_df["Name"].astype(str).str.strip().tolist()
+review_signature = (tuple(availability_names), tuple(points_names))
+review_state_prefix = (
+    f"name_review_{Path(personnel_csv).resolve()}_{Path(points_csv).resolve()}_"
+    f"{Path(availability_input_csv).resolve()}_{year}_{month}"
+)
+review_signature_key = f"{review_state_prefix}_signature"
+availability_review_key = f"{review_state_prefix}_availability"
+points_review_key = f"{review_state_prefix}_points"
+
+if st.session_state.get(review_signature_key) != review_signature:
+    st.session_state[review_signature_key] = review_signature
+    st.session_state[availability_review_key] = build_availability_mismatch_table(availability_names, points_names)
+    st.session_state[points_review_key] = build_points_mismatch_table(availability_names, points_names)
+
+availability_review_df = st.session_state[availability_review_key]
+points_review_df = st.session_state[points_review_key]
+
+availability_review_col, points_review_col = st.columns(2)
+
+with availability_review_col:
+    st.subheader("Availability Not In DutyPts")
+    if availability_review_df.empty:
+        st.info("No availability-only names.")
+    else:
+        availability_review_df = render_data_editor_with_meta(
+            availability_review_df,
+            key=f"{availability_review_key}_editor",
+            use_container_width=True,
+            disabled=["Availability Name"],
+            column_config={
+                "Match To DutyPts Name": st.column_config.SelectboxColumn(
+                    "Match To DutyPts Name",
+                    options=["", *points_names],
+                    help="Select the dutypts name that matches this availability name for this session.",
+                ),
+                "Disable": st.column_config.CheckboxColumn(
+                    "Disable",
+                    help="Remove this availability name from the current session without changing source files.",
+                ),
+            },
+        )
+        st.session_state[availability_review_key] = availability_review_df
+
+with points_review_col:
+    st.subheader("DutyPts Not In Availability")
+    if points_review_df.empty:
+        st.info("No dutypts-only names.")
+    else:
+        points_review_df = render_data_editor_with_meta(
+            points_review_df,
+            key=f"{points_review_key}_editor",
+            use_container_width=True,
+            disabled=["DutyPts Name"],
+            column_config={
+                "Match To Availability Name": st.column_config.SelectboxColumn(
+                    "Match To Availability Name",
+                    options=["", *availability_names],
+                    help="Select the availability name that matches this dutypts name for this session.",
+                ),
+                "Disable": st.column_config.CheckboxColumn(
+                    "Disable",
+                    help="Remove this dutypts name from the current session without changing source files.",
+                ),
+            },
+        )
+        st.session_state[points_review_key] = points_review_df
+
+if availability_review_df.empty and points_review_df.empty:
+    st.info("No clerk-name mismatches detected between Availability and dutypts.")
+
+selected_dutypts_matches = [
+    str(row["Match To DutyPts Name"]).strip()
+    for _, row in availability_review_df.iterrows()
+    if not bool(row.get("Disable", False)) and str(row.get("Match To DutyPts Name", "")).strip()
+]
+duplicate_selected_dutypts_matches = sorted(
+    {name for name in selected_dutypts_matches if selected_dutypts_matches.count(name) > 1}
+)
+if duplicate_selected_dutypts_matches:
+    st.error(
+        "Multiple availability names are matched to the same dutypts name: "
+        + ", ".join(duplicate_selected_dutypts_matches)
+        + ". Keep each selected match unique."
+    )
+    st.stop()
+
+selected_availability_matches = [
+    str(row["Match To Availability Name"]).strip()
+    for _, row in points_review_df.iterrows()
+    if not bool(row.get("Disable", False)) and str(row.get("Match To Availability Name", "")).strip()
+]
+duplicate_selected_availability_matches = sorted(
+    {name for name in selected_availability_matches if selected_availability_matches.count(name) > 1}
+)
+if duplicate_selected_availability_matches:
+    st.error(
+        "Multiple dutypts names are matched to the same availability name: "
+        + ", ".join(duplicate_selected_availability_matches)
+        + ". Keep each selected match unique."
+    )
+    st.stop()
+
+corrected_availability_df, corrected_points_df = apply_name_corrections(
+    availability_df=solver_availability_df,
+    points_df=points_df,
+    availability_review_df=st.session_state[availability_review_key],
+    points_review_df=st.session_state[points_review_key],
+)
+
+duplicate_corrected_availability_names = corrected_availability_df["Name"][
+    corrected_availability_df["Name"].duplicated(keep=False)
+].unique().tolist()
+if duplicate_corrected_availability_names:
+    st.error(
+        "Name corrections create duplicate availability names: "
+        + ", ".join(sorted(duplicate_corrected_availability_names))
+        + ". Adjust the review tables before scheduling."
+    )
+    st.stop()
+
+duplicate_corrected_points_names = corrected_points_df["Name"][
+    corrected_points_df["Name"].duplicated(keep=False)
+].unique().tolist()
+if duplicate_corrected_points_names:
+    st.error(
+        "Name corrections create duplicate dutypts names: "
+        + ", ".join(sorted(duplicate_corrected_points_names))
+        + ". Adjust the review tables before scheduling."
+    )
+    st.stop()
+
+corrected_availability_names = corrected_availability_df["Name"].astype(str).str.strip().tolist()
+corrected_point_names = corrected_points_df["Name"].astype(str).str.strip().tolist()
+remaining_unmatched_availability = [
+    name for name in corrected_availability_names if name not in set(corrected_point_names)
+]
+remaining_unmatched_points = [
+    name for name in corrected_point_names if name not in set(corrected_availability_names)
+]
+if remaining_unmatched_availability:
+    st.warning(
+        "These availability names still do not match any dutypts row and will be excluded from Duty Point Management and scheduling: "
+        + ", ".join(remaining_unmatched_availability)
+    )
+elif not availability_review_df.empty or not points_review_df.empty:
+    st.success("All reviewed names now match for this session.")
+
+if remaining_unmatched_points:
+    st.caption(
+        "DutyPts names still without an availability match in the current session: "
+        + ", ".join(remaining_unmatched_points)
+    )
+
+try:
+    projected_points_df = project_duties_preview(
+        availability_df=corrected_availability_df,
+        points_df=corrected_points_df,
+        config=solver_config,
+    )
+except Exception as exc:
+    st.error(f"Unable to project duty points after applying name corrections: {exc}")
     st.stop()
 
 selected_month_name = MONTH_COLUMN_NAMES[int(month)]
@@ -246,7 +558,11 @@ display_columns = [
     "Total",
     "Obligation",
 ]
-st.data_editor(display_points_df[display_columns], use_container_width=True, hide_index=True, disabled=[col for col in display_columns if col != selected_month_name])
+render_data_editor_with_meta(
+    display_points_df[display_columns],
+    use_container_width=True,
+    disabled=[col for col in display_columns if col != selected_month_name],
+)
 st.markdown(f"Projected: {display_points_df[selected_month_name].sum()}")
 st.markdown(f"Required: {edited_df['Slot 1'].sum() + edited_df['Slot 2'].sum()}")
 
@@ -267,11 +583,12 @@ if generate_primary:
     try:
         with st.spinner("Generating primary schedule..."):
             st.session_state.primary_result = generate_schedule_from_inputs(
-                availability_df=solver_availability_df,
+                availability_df=corrected_availability_df,
                 points_csv=points_csv,
                 month=int(month),
                 monthly_obligation=float(monthly_obligation),
                 config=solver_config,
+                points_df_override=corrected_points_df,
             ).to_dict()
             st.session_state.reserve_results = None
     except Exception as exc:
@@ -281,12 +598,13 @@ if generate_reserves:
     try:
         with st.spinner("Generating primary and reserve schedules..."):
             reserve_response = generate_reserve_schedules_from_inputs(
-                availability_df=solver_availability_df,
+                availability_df=corrected_availability_df,
                 points_csv=points_csv,
                 month=int(month),
                 monthly_obligation=float(monthly_obligation),
                 config=solver_config,
                 reserve_rounds=int(reserve_rounds),
+                points_df_override=corrected_points_df,
             )
             st.session_state.reserve_results = {
                 "primary": reserve_response.primary.to_dict(),

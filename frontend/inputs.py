@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import calendar
 import re
+from functools import lru_cache
 from pathlib import Path
 
 import holidays
@@ -27,6 +28,7 @@ MONTH_COLUMN_NAMES = {
 }
 
 
+@lru_cache(maxsize=None)
 def _singapore_public_holiday_lookup(year: int) -> dict[object, str]:
     return {
         holiday_date: str(name)
@@ -34,12 +36,16 @@ def _singapore_public_holiday_lookup(year: int) -> dict[object, str]:
     }
 
 
+def singapore_public_holiday_name(date_value: object) -> str:
+    date = pd.Timestamp(date_value).date()
+    return _singapore_public_holiday_lookup(date.year).get(date, "")
+
+
 def build_slot_config(year: int, month: int) -> pd.DataFrame:
     _, last_day = calendar.monthrange(year, month)
     days = pd.date_range(f"{year}-{month:02d}-01", periods=last_day)
     day_strings = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    public_holidays = _singapore_public_holiday_lookup(year)
-    holiday_labels = [public_holidays.get(day.date(), "") for day in days]
+    holiday_labels = [singapore_public_holiday_name(day) for day in days]
     return pd.DataFrame(
         {
             "Date": [day.strftime("%d/%m/%Y") for day in days],
@@ -230,7 +236,7 @@ def grid_from_normalized_availability(availability_df: pd.DataFrame, slots: list
 
 def availability_for_solver(grid_df: pd.DataFrame, slots: list[str]) -> pd.DataFrame:
     availability_df = grid_df.copy()
-    availability_df["Name"] = availability_df["Name"].astype(str)
+    availability_df["Name"] = availability_df["Name"].astype(str).str.strip()
 
     for slot in slots:
         availability_df[slot] = (
@@ -267,7 +273,7 @@ def load_points(points_csv: str, month: int, monthly_obligation: float) -> pd.Da
     historical_points = points_df[previous_months].apply(pd.to_numeric, errors="coerce")
     cumulative_points_df = pd.DataFrame(
         {
-            "Name": points_df["Name"].astype(str),
+            "Name": points_df["Name"].astype(str).str.strip(),
             **{month_name: historical_points[month_name] for month_name in previous_months},
             "Duty": historical_points.fillna(0).sum(axis=1),
             "Obligation": monthly_obligation * (historical_points.notna().sum(axis=1) + 1),

@@ -8,7 +8,7 @@ from typing import Dict
 import pandas as pd
 from ortools.sat.python import cp_model
 
-from inputs import load_points
+from inputs import load_points, singapore_public_holiday_name
 from models import ComplianceRow, ReserveScheduleResponse, ScheduleResult, ScheduleRow, SummaryRow
 
 
@@ -336,14 +336,18 @@ def generate_schedule(
 
     slot_dates = {slot: _parse_slot_date(slot) for slot in slots}
     clerk_names = planning_table[NAME_COLUMN].tolist()
-    schedule_rows = [
-        ScheduleRow(
-            date=slot,
-            assigned_clerk=next(clerk for clerk in clerk_names if solver.Value(x[clerk, slot]) == 1),
-            weekend=slot_dates[slot].weekday() >= 5,
+    schedule_rows: list[ScheduleRow] = []
+    for slot in slots:
+        holiday_name = singapore_public_holiday_name(slot_dates[slot])
+        schedule_rows.append(
+            ScheduleRow(
+                date=slot,
+                assigned_clerk=next(clerk for clerk in clerk_names if solver.Value(x[clerk, slot]) == 1),
+                weekend=slot_dates[slot].weekday() >= 5,
+                public_holiday=bool(holiday_name),
+                holiday=holiday_name,
+            )
         )
-        for slot in slots
-    ]
 
     weekend_slots = [slot for slot in slots if slot_dates[slot].weekday() >= 5]
     weekend_preference = {
@@ -408,8 +412,9 @@ def generate_schedule_from_inputs(
     month: int,
     monthly_obligation: float,
     config: SchedulerConfig,
+    points_df_override: pd.DataFrame | None = None,
 ) -> ScheduleResult:
-    points_df = load_points(points_csv, month, monthly_obligation)
+    points_df = points_df_override.copy() if points_df_override is not None else load_points(points_csv, month, monthly_obligation)
     result, _ = generate_schedule(availability_df=availability_df, points_df=points_df, config=config)
     return result
 
@@ -421,8 +426,9 @@ def generate_reserve_schedules_from_inputs(
     monthly_obligation: float,
     config: SchedulerConfig,
     reserve_rounds: int,
+    points_df_override: pd.DataFrame | None = None,
 ) -> ReserveScheduleResponse:
-    points_df = load_points(points_csv, month, monthly_obligation)
+    points_df = points_df_override.copy() if points_df_override is not None else load_points(points_csv, month, monthly_obligation)
     primary, planning_table = generate_schedule(availability_df=availability_df, points_df=points_df, config=config)
 
     reserves: list[ScheduleResult] = []
