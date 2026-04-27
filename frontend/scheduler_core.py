@@ -408,27 +408,27 @@ def apply_reserve_round(planning_table: pd.DataFrame, schedule_rows: list[Schedu
 
 def generate_schedule_from_inputs(
     availability_df: pd.DataFrame,
-    points_csv: str,
+    points_df: pd.DataFrame,
     month: int,
     monthly_obligation: float,
     config: SchedulerConfig,
     points_df_override: pd.DataFrame | None = None,
 ) -> ScheduleResult:
-    points_df = points_df_override.copy() if points_df_override is not None else load_points(points_csv, month, monthly_obligation)
+    points_df = points_df_override.copy() if points_df_override is not None else load_points(points_df, month, monthly_obligation)
     result, _ = generate_schedule(availability_df=availability_df, points_df=points_df, config=config)
     return result
 
 
 def generate_reserve_schedules_from_inputs(
     availability_df: pd.DataFrame,
-    points_csv: str,
+    points_df: pd.DataFrame,
     month: int,
     monthly_obligation: float,
     config: SchedulerConfig,
     reserve_rounds: int,
     points_df_override: pd.DataFrame | None = None,
 ) -> ReserveScheduleResponse:
-    points_df = points_df_override.copy() if points_df_override is not None else load_points(points_csv, month, monthly_obligation)
+    points_df = points_df_override.copy() if points_df_override is not None else load_points(points_df, month, monthly_obligation)
     primary, planning_table = generate_schedule(availability_df=availability_df, points_df=points_df, config=config)
 
     reserves: list[ScheduleResult] = []

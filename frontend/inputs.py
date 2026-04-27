@@ -3,15 +3,8 @@ from __future__ import annotations
 import calendar
 import re
 from functools import lru_cache
-from pathlib import Path
-
 import holidays
 import pandas as pd
-
-DEFAULT_POINTS_CSV = "../dutypts.csv"
-DEFAULT_PERSONNEL_CSV = "../personnel.csv"
-DEFAULT_AVAILABILITY_INPUT_CSV = "../availability_input.csv"
-DEFAULT_AVAILABILITY_OUTPUT_CSV = "../Availability.csv"
 MONTH_COLUMN_NAMES = {
     1: "JAN",
     2: "FEB",
@@ -72,11 +65,6 @@ def slot_labels_from_config(config_df: pd.DataFrame) -> tuple[list[str], list[st
         else:
             warning_slots.append(date)
     return slots, warning_slots
-
-
-def load_clerks(personnel_csv: str = DEFAULT_PERSONNEL_CSV) -> pd.DataFrame:
-    return pd.read_csv(Path(personnel_csv))
-
 
 def build_availability_template(clerks_df: pd.DataFrame, slots: list[str]) -> pd.DataFrame:
     return pd.DataFrame(
@@ -175,13 +163,11 @@ def _latest_responses_by_name(input_df: pd.DataFrame) -> pd.DataFrame:
 
 def build_availability_from_input(
     clerks_df: pd.DataFrame,
+    responses_df: pd.DataFrame,
     slots: list[str],
-    availability_input_csv: str,
-    output_csv: str,
     year: int,
     month: int,
 ) -> pd.DataFrame:
-    responses_df = pd.read_csv(Path(availability_input_csv))
     required_columns = {"Timestamp", "Your Name (Select from list)"}
     missing_columns = sorted(required_columns - set(responses_df.columns))
     if missing_columns:
@@ -224,9 +210,7 @@ def build_availability_from_input(
             if int(slot_date.day) in unavailable_days:
                 availability_df.loc[row_idx, str(item["slot"])] = 0
 
-    normalized_df = availability_for_solver(availability_df, slots)
-    normalized_df.to_csv(Path(output_csv), index=False)
-    return normalized_df
+    return availability_for_solver(availability_df, slots)
 
 
 def grid_from_normalized_availability(availability_df: pd.DataFrame, slots: list[str]) -> pd.DataFrame:
@@ -249,8 +233,7 @@ def availability_for_solver(grid_df: pd.DataFrame, slots: list[str]) -> pd.DataF
     availability_df["Availability"] = (availability_df[slots] > 0).sum(axis=1)
     return availability_df[["Name", *slots, "Availability"]]
 
-def load_points(points_csv: str, month: int, monthly_obligation: float) -> pd.DataFrame:
-    points_df = pd.read_csv(Path(points_csv))
+def load_points(points_df: pd.DataFrame, month: int, monthly_obligation: float) -> pd.DataFrame:
     if "Name" not in points_df.columns:
         raise ValueError("Points CSV must include a 'Name' column.")
 
