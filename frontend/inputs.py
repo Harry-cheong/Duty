@@ -233,13 +233,18 @@ def availability_for_solver(grid_df: pd.DataFrame, slots: list[str]) -> pd.DataF
     availability_df["Availability"] = (availability_df[slots] > 0).sum(axis=1)
     return availability_df[["Name", *slots, "Availability"]]
 
-def load_points(points_df: pd.DataFrame, month: int, monthly_obligation: float) -> pd.DataFrame:
+def _load_points_by_suffix(
+    points_df: pd.DataFrame,
+    month: int,
+    monthly_obligation: float,
+    suffix: str,
+) -> pd.DataFrame:
     if "Name" not in points_df.columns:
         raise ValueError("Points CSV must include a 'Name' column.")
 
     selected_month = int(month)
     previous_months = [
-        MONTH_COLUMN_NAMES.get(((selected_month - offset - 1) % 12) + 1)
+        f"{MONTH_COLUMN_NAMES.get(((selected_month - offset - 1) % 12) + 1)}_{suffix}"
         for offset in range(1, 3)
     ]
     if any(month_name is None for month_name in previous_months):
@@ -253,7 +258,7 @@ def load_points(points_df: pd.DataFrame, month: int, monthly_obligation: float) 
             f"Available columns: {available_columns}"
         )
 
-    historical_points = points_df[previous_months].apply(pd.to_numeric, errors="coerce")
+    historical_points = points_df[previous_months]
     cumulative_points_df = pd.DataFrame(
         {
             "Name": points_df["Name"].astype(str).str.strip(),
@@ -264,3 +269,11 @@ def load_points(points_df: pd.DataFrame, month: int, monthly_obligation: float) 
     )
 
     return cumulative_points_df
+
+
+def load_duty_points(points_df: pd.DataFrame, month: int, monthly_obligation: float) -> pd.DataFrame:
+    return _load_points_by_suffix(points_df, month, monthly_obligation, "Duty")
+
+
+def load_reserve_points(points_df: pd.DataFrame, month: int, monthly_obligation: float) -> pd.DataFrame:
+    return _load_points_by_suffix(points_df, month, monthly_obligation, "Reserve")

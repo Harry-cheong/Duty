@@ -8,7 +8,7 @@ from typing import Dict
 import pandas as pd
 from ortools.sat.python import cp_model
 
-from inputs import load_points, singapore_public_holiday_name
+from inputs import load_duty_points, load_reserve_points, singapore_public_holiday_name
 from models import ComplianceRow, ReserveScheduleResponse, ScheduleResult, ScheduleRow, SummaryRow
 
 
@@ -95,17 +95,30 @@ def _project_duties(planning_table: pd.DataFrame, duty_target: int, rng: random.
     return planning_table
 
 
+def _apply_existing_projection(planning_table: pd.DataFrame, duty_target: int) -> pd.DataFrame:
+    planning_table[PROJECTED_COLUMN] = (
+        pd.to_numeric(planning_table[PROJECTED_COLUMN], errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
+    planning_table["Monthly Duty Points"] = 0
+    return planning_table
+
+
 def project_duties_preview(
     availability_df: pd.DataFrame,
     points_df: pd.DataFrame,
     config: SchedulerConfig,
+    num_slots: int,
 ) -> pd.DataFrame:
     planning_table, _, _, _ = _prepare_planning_table(
         availability_df=availability_df,
         points_df=points_df,
     )
     rng = _reset_rng(config)
-    planning_table = _project_duties(planning_table, len(_slot_columns(availability_df)), rng)
+    
+    planning_table = _project_duties(planning_table, num_slots, rng)
+   
     historical_columns = [
         column
         for column in points_df.columns
@@ -324,8 +337,11 @@ def generate_schedule(
         raise ValueError("No duty slots are configured.")
 
     duty_target = len(slots)
-    rng = _reset_rng(config)
-    planning_table = _project_duties(planning_table, duty_target, rng)
+    if PROJECTED_COLUMN in planning_table.columns:
+        planning_table = _apply_existing_projection(planning_table, duty_target)
+    else:
+        rng = _reset_rng(config)
+        planning_table = _project_duties(planning_table, duty_target, rng)
 
     mode, solver, x, total_duties, weekend_count, weekend_imbalance, preferred_weekend_total = _solve_schedule(
         planning_table=planning_table,
@@ -397,13 +413,69 @@ def generate_schedule(
 
 
 def apply_reserve_round(planning_table: pd.DataFrame, schedule_rows: list[ScheduleRow]) -> pd.DataFrame:
-    next_availability = planning_table.copy()
+    slot_columns = _slot_columns(planning_table)
+    next_availability = planning_table[[NAME_COLUMN, *slot_columns, AVAILABILITY_COLUMN]].copy()
     for item in schedule_rows:
         row_idx = next_availability.index[next_availability[NAME_COLUMN] == item.assigned_clerk].item()
         next_availability.loc[row_idx, item.date] = 0
-    slot_columns = _slot_columns(next_availability)
     next_availability[AVAILABILITY_COLUMN] = (next_availability[slot_columns] > 0).sum(axis=1)
     return next_availability
+
+
+def apply_schedule_to_availability(
+    availability_df: pd.DataFrame,
+    schedule_rows: list[ScheduleRow],
+) -> pd.DataFrame:
+    next_availability = availability_df.copy()
+    slot_columns = _slot_columns(next_availability)
+    for item in schedule_rows:
+        row_idx = next_availability.index[next_availability[NAME_COLUMN] == item.assigned_clerk].item()
+        next_availability.loc[row_idx, item.date] = 0
+    next_availability[AVAILABILITY_COLUMN] = (next_availability[slot_columns] > 0).sum(axis=1)
+    return next_availability
+
+
+def _consume_projected_points(points_df: pd.DataFrame, schedule_result: ScheduleResult) -> pd.DataFrame:
+    next_points_df = points_df.copy()
+    if PROJECTED_COLUMN not in next_points_df.columns:
+        return next_points_df
+
+    assigned_lookup = {row.name: int(row.assigned) for row in schedule_result.summary}
+    next_points_df[NAME_COLUMN] = next_points_df[NAME_COLUMN].astype(str).str.strip()
+    next_points_df[PROJECTED_COLUMN] = (
+        pd.to_numeric(next_points_df[PROJECTED_COLUMN], errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
+    next_points_df[PROJECTED_COLUMN] = next_points_df.apply(
+        lambda row: max(int(row[PROJECTED_COLUMN]) - assigned_lookup.get(str(row[NAME_COLUMN]).strip(), 0), 0),
+        axis=1,
+    )
+    return next_points_df
+
+
+def _reserve_round_points(points_df: pd.DataFrame, duty_target: int) -> pd.DataFrame:
+    round_points_df = points_df.copy()
+    if PROJECTED_COLUMN not in round_points_df.columns:
+        return round_points_df
+
+    remaining_projection = (
+        pd.to_numeric(round_points_df[PROJECTED_COLUMN], errors="coerce")
+        .fillna(0)
+        .astype(int)
+    )
+    round_projection = pd.Series(0, index=round_points_df.index, dtype=int)
+
+    for _ in range(duty_target):
+        candidates = remaining_projection[remaining_projection > 0]
+        if candidates.empty:
+            break
+        next_index = candidates.idxmax()
+        round_projection.at[next_index] += 1
+        remaining_projection.at[next_index] -= 1
+
+    round_points_df[PROJECTED_COLUMN] = round_projection
+    return round_points_df
 
 
 def generate_schedule_from_inputs(
@@ -414,7 +486,11 @@ def generate_schedule_from_inputs(
     config: SchedulerConfig,
     points_df_override: pd.DataFrame | None = None,
 ) -> ScheduleResult:
-    points_df = points_df_override.copy() if points_df_override is not None else load_points(points_df, month, monthly_obligation)
+    points_df = (
+        points_df_override.copy()
+        if points_df_override is not None
+        else load_duty_points(points_df, month, monthly_obligation)
+    )
     result, _ = generate_schedule(availability_df=availability_df, points_df=points_df, config=config)
     return result
 
@@ -424,23 +500,55 @@ def generate_reserve_schedules_from_inputs(
     points_df: pd.DataFrame,
     month: int,
     monthly_obligation: float,
+    reserve_monthly_obligation: float | None,
     config: SchedulerConfig,
     reserve_rounds: int,
     points_df_override: pd.DataFrame | None = None,
+    reserve_points_df_override: pd.DataFrame | None = None,
+    primary_result_override: ScheduleResult | None = None,
 ) -> ReserveScheduleResponse:
-    points_df = points_df_override.copy() if points_df_override is not None else load_points(points_df, month, monthly_obligation)
-    primary, planning_table = generate_schedule(availability_df=availability_df, points_df=points_df, config=config)
+    primary_points_df = (
+        points_df_override.copy()
+        if points_df_override is not None
+        else load_duty_points(points_df, month, monthly_obligation)
+    )
+    reserve_points_df = (
+        reserve_points_df_override.copy()
+        if reserve_points_df_override is not None
+        else load_reserve_points(
+            points_df,
+            month,
+            monthly_obligation if reserve_monthly_obligation is None else reserve_monthly_obligation,
+        )
+    )
+    if primary_result_override is not None:
+        primary = primary_result_override
+        current_availability = apply_schedule_to_availability(availability_df, primary.schedule)
+    else:
+        primary, planning_table = generate_schedule(
+            availability_df=availability_df,
+            points_df=primary_points_df,
+            config=config,
+        )
+        current_availability = apply_reserve_round(planning_table, primary.schedule)
 
     reserves: list[ScheduleResult] = []
-    current_availability = apply_reserve_round(planning_table, primary.schedule)
+    current_reserve_points = reserve_points_df.copy()
     for _ in range(reserve_rounds):
+        if PROJECTED_COLUMN in current_reserve_points.columns and int(current_reserve_points[PROJECTED_COLUMN].sum()) <= 0:
+            break
+        round_reserve_points = _reserve_round_points(
+            current_reserve_points,
+            len(_slot_columns(current_availability)),
+        )
         reserve_result, reserve_planning_table = generate_schedule(
             availability_df=availability_df,
-            points_df=points_df,
+            points_df=round_reserve_points,
             config=config,
             availability_override=current_availability,
         )
         reserves.append(reserve_result)
         current_availability = apply_reserve_round(reserve_planning_table, reserve_result.schedule)
+        current_reserve_points = _consume_projected_points(current_reserve_points, reserve_result)
 
     return ReserveScheduleResponse(primary=primary, reserves=reserves)

@@ -14,7 +14,8 @@ from inputs import (
     build_slot_config,
     grid_from_normalized_availability,
     slot_labels_from_config,
-    load_points,
+    load_duty_points,
+    load_reserve_points,
 )
 from scheduler_core import (
     SchedulerConfig,
@@ -34,6 +35,8 @@ if "step" not in st.session_state:
 
 if "primary_result" not in st.session_state:
     st.session_state.primary_result = None
+if "primary_result_obj" not in st.session_state:
+    st.session_state.primary_result_obj = None
 if "reserve_results" not in st.session_state:
     st.session_state.reserve_results = None
 
@@ -54,14 +57,14 @@ def table_dimensions_caption(df: pd.DataFrame) -> str:
     return f"{df.shape[1]} columns x {df.shape[0]} rows"
 
 
-def render_dataframe_with_dimensions(df: pd.DataFrame) -> None:
-    st.dataframe(df, use_container_width=True, hide_index=False)
+def render_dataframe_with_dimensions(df: pd.DataFrame, hide_index=False) -> None:
+    st.dataframe(df, use_container_width=True, hide_index=hide_index)
     st.caption(table_dimensions_caption(df))
 
 
-def render_data_editor_with_dimensions(df: pd.DataFrame, **kwargs: Any) -> pd.DataFrame:
+def render_data_editor_with_dimensions(df: pd.DataFrame, hide_index=False, **kwargs: Any) -> pd.DataFrame:
     disabled_columns = list(kwargs.pop("disabled", []))
-    editor_df = st.data_editor(df, disabled=["_index", *disabled_columns], hide_index=False, **kwargs)
+    editor_df = st.data_editor(df, disabled=["_index", *disabled_columns], hide_index=hide_index, **kwargs)
     st.caption(table_dimensions_caption(df))
     return pd.DataFrame(editor_df).reset_index(drop=True)
 
@@ -80,6 +83,7 @@ def build_availability_mismatch_table(
                 "Availability Name": availability_name,
                 "Match To DutyPts Name": "",
                 "Disable": False,
+                "New Clerk": False,
             }
         )
 
@@ -89,12 +93,9 @@ def build_availability_mismatch_table(
             "Availability Name",
             "Match To DutyPts Name",
             "Disable",
+            "New Clerk",
         ],
     )
-
-
-def warn(message: str):
-    st.markdown(f"<span style='color: red; font-size: 20px'>{message}</span>", unsafe_allow_html=True)
 
 
 def normalize_editor_df(df: pd.DataFrame) -> pd.DataFrame:
@@ -129,6 +130,23 @@ def step_2_is_ready() -> bool:
         and isinstance(slots, list)
         and len(slots) > 0
         and has_required_columns(finalised_availability_df, {"No", "Name", *slots})
+    )
+
+def step_3_is_ready() -> bool:
+    slots = st.session_state.get("slots")
+    duty_projection_df = st.session_state.get("edited_duty_projection_df")
+    reserve_projection_df = st.session_state.get("edited_reserve_projection_df")
+    selected_month_name = st.session_state.get("selected_month_name")
+    return (
+        isinstance(slots, list)
+        and len(slots) > 0
+        and isinstance(selected_month_name, str)
+        and isinstance(duty_projection_df, pd.DataFrame)
+        and isinstance(reserve_projection_df, pd.DataFrame)
+        and selected_month_name in duty_projection_df.columns
+        and selected_month_name in reserve_projection_df.columns
+        and duty_projection_df[selected_month_name].sum() == len(slots)
+        and reserve_projection_df[selected_month_name].sum() == len(slots) * reserve_rounds
     )
 
 
@@ -170,24 +188,33 @@ def build_points_mismatch_table(
 
 def apply_name_corrections(
     availability_df: pd.DataFrame,
-    points_df: pd.DataFrame,
+    duty_points_df: pd.DataFrame,
+    reserve_points_df: pd.DataFrame,
     availability_review_df: pd.DataFrame,
     points_review_df: pd.DataFrame,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    duty_obligation: float,
+    reserve_obligation: float,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     corrected_availability_df = availability_df.copy()
-    corrected_points_df = points_df.copy()
+    corrected_duty_points_df = duty_points_df.copy()
+    corrected_reserve_points_df = reserve_points_df.copy()
     points_renames: dict[str, str] = {}
     disabled_availability_names: set[str] = set()
     disabled_points_names: set[str] = set()
+    new_clerk_names: set[str] = set()
 
     for _, row in availability_review_df.iterrows():
         availability_name = str(row.get("Availability Name", "")).strip()
         matched_dutypts_name = str(row.get("Match To DutyPts Name", "")).strip()
         disabled = bool(row.get("Disable", False))
+        new_clerk = bool(row.get("New Clerk", False))
         if not availability_name:
             continue
         if disabled:
             disabled_availability_names.add(availability_name)
+            continue
+        if new_clerk:
+            new_clerk_names.add(availability_name)
             continue
         if matched_dutypts_name:
             points_renames[matched_dutypts_name] = availability_name
@@ -208,13 +235,60 @@ def apply_name_corrections(
     corrected_availability_df = corrected_availability_df[
         ~corrected_availability_df["Name"].isin(disabled_availability_names)
     ].copy()
-    corrected_points_df["Name"] = corrected_points_df["Name"].astype(str).str.strip().map(
-        lambda name: points_renames.get(name, name)
+
+    def _correct_points_df(points_df: pd.DataFrame, monthly_obligation: float) -> pd.DataFrame:
+        corrected_points_df = points_df.copy()
+        corrected_points_df["Name"] = corrected_points_df["Name"].astype(str).str.strip().map(
+            lambda name: points_renames.get(name, name)
+        )
+        corrected_points_df = corrected_points_df[
+            ~corrected_points_df["Name"].isin(disabled_points_names)
+        ].copy()
+
+        existing_point_names = set(corrected_points_df["Name"].astype(str).str.strip().tolist())
+        historical_columns = [
+            column
+            for column in corrected_points_df.columns
+            if column not in {"Name", "Duty", "Obligation"}
+        ]
+        new_rows = []
+        for name in sorted(new_clerk_names):
+            if name in existing_point_names:
+                continue
+            new_row = {"Name": name, "Duty": 0, "Obligation": float(monthly_obligation)}
+            for column in historical_columns:
+                new_row[column] = pd.NA
+            new_rows.append(new_row)
+
+        if new_rows:
+            corrected_points_df = pd.concat(
+                [corrected_points_df, pd.DataFrame(new_rows, columns=corrected_points_df.columns)],
+                ignore_index=True,
+            )
+        return corrected_points_df
+
+    corrected_duty_points_df = _correct_points_df(corrected_duty_points_df, duty_obligation)
+    corrected_reserve_points_df = _correct_points_df(corrected_reserve_points_df, reserve_obligation)
+    return corrected_availability_df, corrected_duty_points_df, corrected_reserve_points_df
+
+
+def build_points_override_from_projection(
+    base_points_df: pd.DataFrame,
+    edited_projection_df: pd.DataFrame,
+    selected_month_name: str,
+) -> pd.DataFrame:
+    points_override_df = base_points_df.copy()
+    projected_lookup = (
+        edited_projection_df[["Name", selected_month_name]]
+        .copy()
+        .assign(
+            Name=lambda df: df["Name"].astype(str).str.strip(),
+            Projected=lambda df: pd.to_numeric(df[selected_month_name], errors="coerce").fillna(0).astype(int),
+        )
+        .set_index("Name")["Projected"]
     )
-    corrected_points_df = corrected_points_df[
-        ~corrected_points_df["Name"].isin(disabled_points_names)
-    ].copy()
-    return corrected_availability_df, corrected_points_df
+    points_override_df["Projected"] = points_override_df["Name"].astype(str).str.strip().map(projected_lookup).fillna(0).astype(int)
+    return points_override_df
 
 
 
@@ -260,16 +334,16 @@ def render_result(result: dict[str, Any], heading: str) -> None:
     tab_schedule, tab_summary, tab_compliance = st.tabs(["Schedule", "Summary", "Compliance"])
 
     with tab_schedule:
-        render_dataframe_with_dimensions(schedule_df)
+        render_dataframe_with_dimensions(schedule_df, hide_index=True)
 
     with tab_summary:
-        render_dataframe_with_dimensions(summary_df)
+        render_dataframe_with_dimensions(summary_df, hide_index=True)
 
     with tab_compliance:
         if compliance_df.empty:
             st.info("No compliance rows returned.")
         else:
-            render_dataframe_with_dimensions(compliance_df)
+            render_dataframe_with_dimensions(compliance_df, hide_index=True)
 
 ## Defaults ##
 today = datetime.datetime.today()
@@ -280,7 +354,8 @@ with st.sidebar:
     st.header("Inputs")
     year = st.number_input("Year", min_value=2000, max_value=2100, value=default_year, step=1)
     month = st.number_input("Month", min_value=1, max_value=12, value=default_month, step=1)
-    monthly_obligation = st.number_input("Duty Per Month", value=1.33)
+    duty_obligation = st.number_input("Duty Per Month", value=1.33)
+    reserve_obligation = st.number_input("Reverse Per Month", value=3)
     min_gap_days = st.slider("Min Gap Days", min_value=1, max_value=31, value=7)
     time_limit_seconds = st.slider("Solver Time Limit", min_value=1, max_value=120, value=10)
     use_random_seed = st.toggle("Use Fixed Random Seed", value=True)
@@ -307,6 +382,15 @@ st.write(f"Step {st.session_state.step} of {num_steps}")
 
 ## Progress Tabs
 if st.session_state.step == 1:
+
+    # Skip Step 1 for testing
+    use_test = st.checkbox("Use sample data", value=False)
+
+    if use_test:
+        st.session_state.personnel_df = pd.read_csv("../test/may/personnel.csv")
+        st.session_state.duty_points_df = pd.read_csv("../test/may/dutypoints.csv")
+        st.session_state.availability_responses_df = pd.read_csv("../test/may/availability_input.csv")
+
     st.header("Step 1: Upload Inputs")
 
     st.subheader("Personnel File")
@@ -320,7 +404,7 @@ if st.session_state.step == 1:
             st.data_editor(st.session_state.personnel_df, hide_index=True, key="personnel_editor")
         )
         if not has_required_columns(st.session_state.personnel_df, {"Name"}):
-            warn("Personnel file must include a Name column.")
+            st.error("Personnel file must include a Name column.")
     
     st.subheader("Duty Points File")
     duty_uploaded_file = st.file_uploader("Ensure duty points listed are updated and correct", type=[".csv"], key="duty_upload")
@@ -333,7 +417,7 @@ if st.session_state.step == 1:
             st.data_editor(st.session_state.duty_points_df, hide_index=True, key="duty_points_editor")
         )
         if not has_required_columns(st.session_state.duty_points_df, {"Name"}):
-            warn("Duty points file must include a Name column.")
+            st.error("Duty points file must include a Name column.")
 
     st.subheader("Availability Responses File")
     availability_uploaded_file = st.file_uploader(
@@ -350,7 +434,7 @@ if st.session_state.step == 1:
             st.data_editor(st.session_state.availability_responses_df, hide_index=True, key="availability_responses_editor")
         )
         if not has_required_columns(st.session_state.availability_responses_df, {"Timestamp", "Your Name (Select from list)"}):
-            warn("Availability responses must include Timestamp and Your Name (Select from list).")
+            st.error("Availability responses must include Timestamp and Your Name (Select from list).")
 
     st.button("Next →", on_click=next_step, use_container_width=True, disabled=not step_1_is_ready())
 
@@ -459,7 +543,7 @@ elif st.session_state.step == 2:
             st.error(f"Unable to build availability grid: {exc}")
 
     else:
-        warn("Please configure personnel, duty points, availability responses and slots!")
+        st.error("Please configure personnel, duty points, availability responses and slots!")
     
     confirmed = st.checkbox("I confirm that all the configurations above are accurate", key="confirm_step2")
 
@@ -468,15 +552,20 @@ elif st.session_state.step == 2:
     col2.button("Next →", on_click=next_step, use_container_width=True, disabled=not (confirmed and step_2_is_ready()))
     
 elif st.session_state.step == 3:
-    st.header("Step 3: Duty Point Management")
-    st.caption("Tabulate duty points done in the last 2 months and project next month's duty points")
+    st.header("Step 3: Duty And Reserve Point Management")
+    st.caption("Tabulate duty and reserve points from the last 2 months and project next month's points.")
 
     if "finalised_availability_df" in st.session_state:
         try:
-            points_df = load_points(
+            duty_points_df = load_duty_points(
                 points_df=st.session_state.duty_points_df,
                 month=int(month),
-                monthly_obligation=float(monthly_obligation),
+                monthly_obligation=float(duty_obligation),
+            )
+            reserve_points_df = load_reserve_points(
+                points_df=st.session_state.duty_points_df,
+                month=int(month),
+                monthly_obligation=float(reserve_obligation),
             )
             solver_config = solver_config_from_inputs()
             try:
@@ -489,7 +578,7 @@ elif st.session_state.step == 3:
             st.caption("Review clerk-name mismatches between Availability and dutypts. Corrections apply only in memory for this app session.")
 
             availability_names = solver_availability_df["Name"].astype(str).str.strip().tolist()
-            points_names = points_df["Name"].astype(str).str.strip().tolist()
+            points_names = duty_points_df["Name"].astype(str).str.strip().tolist()
             review_signature = (tuple(availability_names), tuple(points_names))
             review_state_prefix = (
                 f"name_review_{year}_{month}_"
@@ -529,6 +618,10 @@ elif st.session_state.step == 3:
                                 "Disable",
                                 help="Remove this availability name from the current session without changing source files.",
                             ),
+                            "New Clerk": st.column_config.CheckboxColumn(
+                                "New Clerk", 
+                                help="Add the new clerk into the planner"
+                            )
                         },
                     )
                     st.session_state[availability_review_key] = availability_review_df
@@ -563,8 +656,25 @@ elif st.session_state.step == 3:
             selected_dutypts_matches = [
                 str(row["Match To DutyPts Name"]).strip()
                 for _, row in availability_review_df.iterrows()
-                if not bool(row.get("Disable", False)) and str(row.get("Match To DutyPts Name", "")).strip()
+                if not bool(row.get("Disable", False)) and row.get("Match To DutyPts Name", "")
             ]
+            conflicting_new_clerk_matches = sorted(
+                {
+                    str(row["Availability Name"]).strip()
+                    for _, row in availability_review_df.iterrows()
+                    if not bool(row.get("Disable", False))
+                    and bool(row.get("New Clerk", False))
+                    and str(row.get("Match To DutyPts Name", "")).strip()
+                }
+            )
+            if conflicting_new_clerk_matches:
+                st.error(
+                    "These availability names are marked as New Clerk and also matched to an existing dutypts row: "
+                    + ", ".join(conflicting_new_clerk_matches)
+                    + ". Choose only one action per name."
+                )
+                st.stop()
+
             duplicate_selected_dutypts_matches = sorted(
                 {name for name in selected_dutypts_matches if selected_dutypts_matches.count(name) > 1}
             )
@@ -579,7 +689,7 @@ elif st.session_state.step == 3:
             selected_availability_matches = [
                 str(row["Match To Availability Name"]).strip()
                 for _, row in points_review_df.iterrows()
-                if not bool(row.get("Disable", False)) and str(row.get("Match To Availability Name", "")).strip()
+                if not bool(row.get("Disable", False)) and row.get("Match To Availability Name", "")
             ]
             duplicate_selected_availability_matches = sorted(
                 {name for name in selected_availability_matches if selected_availability_matches.count(name) > 1}
@@ -592,11 +702,14 @@ elif st.session_state.step == 3:
                 )
                 st.stop()
 
-            corrected_availability_df, corrected_points_df = apply_name_corrections(
+            corrected_availability_df, corrected_duty_points_df, corrected_reserve_points_df = apply_name_corrections(
                 availability_df=solver_availability_df,
-                points_df=points_df,
+                duty_points_df=duty_points_df,
+                reserve_points_df=reserve_points_df,
                 availability_review_df=st.session_state[availability_review_key],
                 points_review_df=st.session_state[points_review_key],
+                duty_obligation=float(duty_obligation),
+                reserve_obligation=float(reserve_obligation),
             )
 
             duplicate_corrected_availability_names = corrected_availability_df["Name"][
@@ -610,8 +723,8 @@ elif st.session_state.step == 3:
                 )
                 st.stop()
 
-            duplicate_corrected_points_names = corrected_points_df["Name"][
-                corrected_points_df["Name"].duplicated(keep=False)
+            duplicate_corrected_points_names = corrected_duty_points_df["Name"][
+                corrected_duty_points_df["Name"].duplicated(keep=False)
             ].unique().tolist()
             if duplicate_corrected_points_names:
                 st.error(
@@ -622,7 +735,7 @@ elif st.session_state.step == 3:
                 st.stop()
 
             corrected_availability_names = corrected_availability_df["Name"].astype(str).str.strip().tolist()
-            corrected_point_names = corrected_points_df["Name"].astype(str).str.strip().tolist()
+            corrected_point_names = corrected_duty_points_df["Name"].astype(str).str.strip().tolist()
             remaining_unmatched_availability = [
                 name for name in corrected_availability_names if name not in set(corrected_point_names)
             ]
@@ -644,44 +757,93 @@ elif st.session_state.step == 3:
                 )
 
             try:
-                projected_points_df = project_duties_preview(
+                projected_duty_points_df = project_duties_preview(
                     availability_df=corrected_availability_df,
-                    points_df=corrected_points_df,
+                    points_df=corrected_duty_points_df,
                     config=solver_config,
+                    num_slots=len(st.session_state.slots)
+                )
+                projected_reserve_points_df = project_duties_preview(
+                    availability_df=corrected_availability_df,
+                    points_df=corrected_reserve_points_df,
+                    config=solver_config,
+                    num_slots=len(st.session_state.slots) * reserve_rounds
                 )
             except Exception as exc:
-                st.error(f"Unable to project duty points after applying name corrections: {exc}")
+                st.error(f"Unable to project points after applying name corrections: {exc}")
                 st.stop()
 
             selected_month_name = MONTH_COLUMN_NAMES[int(month)]
-            display_points_df = projected_points_df.rename(columns={"Projected": selected_month_name})
-            display_columns = [
+            st.session_state.selected_month_name = selected_month_name
+            display_duty_points_df = projected_duty_points_df.rename(columns={"Projected": selected_month_name})
+            display_reserve_points_df = projected_reserve_points_df.rename(columns={"Projected": selected_month_name})
+            display_duty_columns = [
                 "Name",
                 *[
                     column
-                    for column in display_points_df.columns
+                    for column in display_duty_points_df.columns
                     if column not in {"Name", "Duty", "Obligation", selected_month_name, "Total", "Difference"}
                 ],
                 selected_month_name,
                 "Total",
                 "Obligation",
             ]
-            render_data_editor_with_dimensions(
-                display_points_df[display_columns],
+            display_reserve_columns = [
+                "Name",
+                *[
+                    column
+                    for column in display_reserve_points_df.columns
+                    if column not in {"Name", "Duty", "Obligation", selected_month_name, "Total", "Difference"}
+                ],
+                selected_month_name,
+                "Total",
+                "Obligation",
+            ]
+
+
+            st.subheader("Duty Points")
+            edited_duty_points_df = render_data_editor_with_dimensions(
+                display_duty_points_df[display_duty_columns],
                 use_container_width=True,
-                disabled=[col for col in display_columns if col != selected_month_name],
+                disabled=[col for col in display_duty_columns if col != selected_month_name],
+                key="duty_projection_editor",
             )
-            st.markdown(f"Projected: {display_points_df[selected_month_name].sum()}")
+            st.markdown(f"Projected: {edited_duty_points_df[selected_month_name].sum()}")
             st.markdown(f"Required: {len(st.session_state.slots)}")
+
+
+            st.subheader("Reserve Points")
+            edited_reserve_points_df = render_data_editor_with_dimensions(
+                display_reserve_points_df[display_reserve_columns],
+                use_container_width=True,
+                disabled=[col for col in display_reserve_columns if col != selected_month_name],
+                key="reserve_projection_editor",
+            )
+            st.markdown(f"Projected: {edited_reserve_points_df[selected_month_name].sum()}")
+            st.markdown(f"Required: {len(st.session_state.slots) * reserve_rounds}")
+
+            st.session_state.edited_duty_projection_df = edited_duty_points_df
+            st.session_state.edited_reserve_projection_df = edited_reserve_points_df
+            st.session_state.final_duty_points_df = build_points_override_from_projection(
+                base_points_df=corrected_duty_points_df,
+                edited_projection_df=edited_duty_points_df,
+                selected_month_name=selected_month_name,
+            )
+            st.session_state.final_reserve_points_df = build_points_override_from_projection(
+                base_points_df=corrected_reserve_points_df,
+                edited_projection_df=edited_reserve_points_df,
+                selected_month_name=selected_month_name,
+            )
             st.session_state.corrected_availability_df = corrected_availability_df
-            st.session_state.corrected_points_df = corrected_points_df
+            st.session_state.corrected_duty_points_df = corrected_duty_points_df
+            st.session_state.corrected_reserve_points_df = corrected_reserve_points_df
             st.session_state.solver_config = solver_config
 
 
         except ValueError:
-            warn("Please check! Missing Duty Points for past months")
+            st.error("Please check the uploaded points file. Required duty/reserve month columns for the last 2 months are missing.")
     else:
-        warn("Please finalise Availability and Preference")
+        st.error("Please finalise Availability and Preference")
     
     col1, col2 = st.columns(2)
     col1.button("← Back", on_click=prev_step, use_container_width=True)
@@ -691,8 +853,12 @@ elif st.session_state.step == 3:
         use_container_width=True,
         disabled=not (
             "corrected_availability_df" in st.session_state
-            and "corrected_points_df" in st.session_state
+            and "corrected_duty_points_df" in st.session_state
+            and "corrected_reserve_points_df" in st.session_state
+            and "final_duty_points_df" in st.session_state
+            and "final_reserve_points_df" in st.session_state
             and "solver_config" in st.session_state
+            and step_3_is_ready()
         ),
     )
 
@@ -702,10 +868,13 @@ elif st.session_state.step == 4:
 
     if (
         "corrected_availability_df" not in st.session_state
-        or "corrected_points_df" not in st.session_state
+        or "corrected_duty_points_df" not in st.session_state
+        or "corrected_reserve_points_df" not in st.session_state
+        or "final_duty_points_df" not in st.session_state
+        or "final_reserve_points_df" not in st.session_state
         or "solver_config" not in st.session_state
     ):
-        warn("Please complete Duty Point Management first.")
+        st.error("Please complete Duty And Reserve Point Management first.")
     else:
         primary_col, reserve_col = st.columns(2)
         generate_primary = primary_col.button("Generate Primary Schedule", use_container_width=True, type="primary")
@@ -714,40 +883,55 @@ elif st.session_state.step == 4:
         if generate_primary:
             try:
                 with st.spinner("Generating primary schedule..."):
-                    st.session_state.primary_result = generate_schedule_from_inputs(
+                    primary_result = generate_schedule_from_inputs(
                         availability_df=st.session_state.corrected_availability_df,
-                        points_df=st.session_state.corrected_points_df,
+                        points_df=st.session_state.final_duty_points_df,
                         month=int(month),
-                        monthly_obligation=float(monthly_obligation),
+                        monthly_obligation=float(duty_obligation),
                         config=st.session_state.solver_config,
-                        points_df_override=st.session_state.corrected_points_df,
-                    ).to_dict()
+                        points_df_override=st.session_state.final_duty_points_df,
+                    )
+                    st.session_state.primary_result_obj = primary_result
+                    st.session_state.primary_result = primary_result.to_dict()
                     st.session_state.reserve_results = None
             except Exception as exc:
+                st.session_state.primary_result_obj = None
                 st.error(f"Schedule generation failed: {exc}")
 
         if generate_reserves:
-            try:
-                with st.spinner("Generating primary and reserve schedules..."):
-                    reserve_response = generate_reserve_schedules_from_inputs(
-                        availability_df=st.session_state.corrected_availability_df,
-                        points_df=st.session_state.corrected_points_df,
-                        month=int(month),
-                        monthly_obligation=float(monthly_obligation),
-                        config=st.session_state.solver_config,
-                        reserve_rounds=int(reserve_rounds),
-                        points_df_override=st.session_state.corrected_points_df,
-                    )
-                    st.session_state.reserve_results = {
-                        "primary": reserve_response.primary.to_dict(),
-                        "reserves": [reserve.to_dict() for reserve in reserve_response.reserves],
-                    }
-                    st.session_state.primary_result = st.session_state.reserve_results["primary"]
-            except Exception as exc:
-                st.error(f"Schedule generation failed: {exc}")
-
+            if st.session_state.get("primary_result_obj") is not None:
+                try:
+                    with st.spinner("Generating reserve schedules..."):
+                        reserve_response = generate_reserve_schedules_from_inputs(
+                            availability_df=st.session_state.corrected_availability_df,
+                            points_df=st.session_state.final_duty_points_df,
+                            month=int(month),
+                            monthly_obligation=float(duty_obligation),
+                            reserve_monthly_obligation=float(reserve_obligation),
+                            config=st.session_state.solver_config,
+                            reserve_rounds=int(reserve_rounds),
+                            points_df_override=st.session_state.final_duty_points_df,
+                            reserve_points_df_override=st.session_state.final_reserve_points_df,
+                            primary_result_override=st.session_state.primary_result_obj,
+                        )
+                        st.session_state.reserve_results = {
+                            "primary": reserve_response.primary.to_dict(),
+                            "reserves": [reserve.to_dict() for reserve in reserve_response.reserves],
+                        }
+                        st.session_state.primary_result = st.session_state.reserve_results["primary"]
+                except Exception as exc:
+                    st.error(f"Schedule generation failed: {exc}")
+            else:
+                st.error("Please generate primary schedule first")
         if st.session_state.primary_result:
             render_result(st.session_state.primary_result, "Primary Schedule")
+            
+        if st.session_state.reserve_results and st.session_state.reserve_results["reserves"]:
+            st.divider()
+            for index, reserve_result in enumerate(st.session_state.reserve_results["reserves"], start=1):
+                render_result(reserve_result, f"Reserve {index}")
+        
+        if st.session_state.primary_result and st.session_state.reserve_results:
             st.subheader("Availability Summary")
             schedule_df = dataframe_from_rows(st.session_state.primary_result["schedule"])
             summary_df = generate_summary(
@@ -756,76 +940,23 @@ elif st.session_state.step == 4:
                 "assigned_clerk",
                 "Duty",
             )
-            render_dataframe_with_dimensions(summary_df)
+            for i, reserve_result in enumerate(
+                (st.session_state.reserve_results or {}).get("reserves", []),
+                start=1,
+            ):
+                reserve_schedule = dataframe_from_rows(reserve_result["schedule"])
+                summary_df = generate_summary(
+                    summary_df,
+                    reserve_schedule,
+                    "assigned_clerk",
+                    f"R{i}",
+                )
+            render_dataframe_with_dimensions(summary_df, hide_index=True)
         else:
             st.info("Generate a schedule to see results.")
 
-        if st.session_state.reserve_results and st.session_state.reserve_results["reserves"]:
-            st.divider()
-            for index, reserve_result in enumerate(st.session_state.reserve_results["reserves"], start=1):
-                render_result(reserve_result, f"Reserve {index}")
-
     col1, col2 = st.columns(2)
     col1.button("← Back", on_click=prev_step, use_container_width=True)
-
-# ### Scheduler ###
-# st.title("Totally Fair Scheduler")
-# st.caption("Single-process desktop scheduler.")
-
-# primary_col, reserve_col = st.columns(2)
-# generate_primary = primary_col.button("Generate Primary Schedule", use_container_width=True, type="primary")
-# generate_reserves = reserve_col.button("Generate With Reserves", use_container_width=True)
-
-# if "primary_result" not in st.session_state:
-#     st.session_state.primary_result = None
-# if "reserve_results" not in st.session_state:
-#     st.session_state.reserve_results = None
-
-# if generate_primary:
-#     try:
-#         with st.spinner("Generating primary schedule..."):
-#             st.session_state.primary_result = generate_schedule_from_inputs(
-#                 availability_df=corrected_availability_df,
-#                 points_csv=points_csv,
-#                 month=int(month),
-#                 monthly_obligation=float(monthly_obligation),
-#                 config=solver_config,
-#                 points_df_override=corrected_points_df,
-#             ).to_dict()
-#             st.session_state.reserve_results = None
-#     except Exception as exc:
-#         st.error(f"Schedule generation failed: {exc}")
-
-# if generate_reserves:
-#     try:
-#         with st.spinner("Generating primary and reserve schedules..."):
-#             reserve_response = generate_reserve_schedules_from_inputs(
-#                 availability_df=corrected_availability_df,
-#                 points_csv=points_csv,
-#                 month=int(month),
-#                 monthly_obligation=float(monthly_obligation),
-#                 config=solver_config,
-#                 reserve_rounds=int(reserve_rounds),
-#                 points_df_override=corrected_points_df,
-#             )
-#             st.session_state.reserve_results = {
-#                 "primary": reserve_response.primary.to_dict(),
-#                 "reserves": [reserve.to_dict() for reserve in reserve_response.reserves],
-#             }
-#             st.session_state.primary_result = st.session_state.reserve_results["primary"]
-#     except Exception as exc:
-#         st.error(f"Schedule generation failed: {exc}")
-
-# if st.session_state.primary_result:
-#     render_result(st.session_state.primary_result, "Primary Schedule")
-# else:
-#     st.info("Generate a schedule to see results.")
-
-
-# if st.session_state.reserve_results and st.session_state.reserve_results["reserves"]:
-#     st.divider()
-#     for index, reserve_result in enumerate(st.session_state.reserve_results["reserves"], start=1):
-#         render_result(reserve_result, f"Reserve {index}")
 
 # @st.cache_data
 # def convert_for_download(df):
@@ -834,15 +965,15 @@ elif st.session_state.step == 4:
 # if st.session_state.primary_result:
 #     st.subheader("Our Finalised Plan")
 #     schedule_df = dataframe_from_rows(st.session_state.primary_result["schedule"])
-#     summarised_df = generate_summary(edited_availability_df, schedule_df, "assigned_clerk", "Duty")
+#     summarised_df = generate_summary(st.session_state.finalised_availability_df, schedule_df, "assigned_clerk", "Duty")
 #     st.dataframe(summarised_df, hide_index=True)
 
-# # csv = convert_for_download(edited_availability_df)
+# csv = convert_for_download(edited_availability_df)
 
-# # st.download_button(
-# #     label="Download CSV",
-# #     data=csv,
-# #     file_name="data.csv",
-# #     mime="text/csv",
-# #     icon=":material/download:",
-# # )
+# st.download_button(
+#     label="Download CSV",
+#     data=csv,
+#     file_name="data.csv",
+#     mime="text/csv",
+#     icon=":material/download:",
+# )
