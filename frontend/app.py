@@ -6,6 +6,8 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
+from st_files_connection import FilesConnection
+import os
 
 from inputs import (
     MONTH_COLUMN_NAMES,
@@ -387,9 +389,33 @@ if st.session_state.step == 1:
     use_test = st.checkbox("Use sample data", value=False)
 
     if use_test:
-        st.session_state.personnel_df = pd.read_csv("../test/may/personnel.csv")
-        st.session_state.duty_points_df = pd.read_csv("../test/may/dutypoints.csv")
-        st.session_state.availability_responses_df = pd.read_csv("../test/may/availability_input.csv")
+        if os.path.exists("../test/may/personnel.csv"):
+            # Attempt to load local files
+            st.session_state.personnel_df = pd.read_csv("../test/may/personnel.csv")
+            st.session_state.duty_points_df = pd.read_csv("../test/may/dutypoints.csv")
+            st.session_state.availability_responses_df = pd.read_csv("../test/may/availability_input.csv")
+            st.info("Loaded Default Files from Local File Directory")
+        
+        else:
+            try:
+                # Attempt to load cloud files
+                conn = st.connection("s3", type=FilesConnection)
+                st.session_state.personnel_df = conn.read(
+                    "s3-duty-planning-defauult-files/personnel.csv",
+                    input_format="csv",
+                )
+                st.session_state.duty_points_df = conn.read(
+                    "s3-duty-planning-defauult-files/dutypoints.csv",
+                    input_format="csv",
+                )
+                st.session_state.availability_responses_df = conn.read(
+                    "s3-duty-planning-defauult-files/availability_input.csv",
+                    input_format="csv",
+                )
+                
+                st.info("Loaded Default Files from S3 Bucket")
+            except:
+                st.warn("Fail to load defaults. Please the relevant files instead.")
 
     st.header("Step 1: Upload Inputs")
 
