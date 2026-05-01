@@ -415,7 +415,7 @@ if st.session_state.step == 1:
                 
                 st.info("Loaded Default Files from S3 Bucket")
             except:
-                st.warn("Fail to load defaults. Please the relevant files instead.")
+                st.warning("Fail to load defaults. Please the relevant files instead.")
 
     st.header("Step 1: Upload Inputs")
 
