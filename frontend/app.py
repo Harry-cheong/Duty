@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import calendar
 import datetime
 from typing import Any
 
 import pandas as pd
 import streamlit as st
-from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
 from st_files_connection import FilesConnection
 import os
 
@@ -26,12 +26,13 @@ from scheduler_core import (
     project_duties_preview,
 )
 from export import (
-    generate_summary
+    build_sample_workbook_bytes,
+    generate_summary,
 )
 
 st.set_page_config(page_title="Totally Fair Scheduler", page_icon="TF", layout="wide")
 
-num_steps = 4
+num_steps = 5
 if "step" not in st.session_state:
     st.session_state.step = 1
 
@@ -516,54 +517,49 @@ elif st.session_state.step == 2:
                 f"availability_grid_{year}_{month}_{len(slots)}_"
                 f"{len(st.session_state.personnel_df)}_{len(st.session_state.availability_responses_df)}"
             )
+            availability_grid_state_key = f"{availability_grid_key}_data"
 
-            cell_style_js = JsCode("""
-                function(params) {
-                    if (params.value === 0) {
-                        return { 'background-color': '#000000' };
-                    } else if (params.value === 2) {
-                        return { 'background-color': '#7B2FBE' };
-                    }
-                    return {};
-                }
-            """)
+            if (
+                availability_grid_state_key not in st.session_state
+                or list(st.session_state[availability_grid_state_key].columns) != expected_columns
+                or len(st.session_state[availability_grid_state_key]) != len(availability_df)
+            ):
+                st.session_state[availability_grid_state_key] = availability_df.copy()
 
-            gb = GridOptionsBuilder.from_dataframe(availability_df)
-
-            gb.configure_default_column(editable=True) 
-
-            gb.configure_column('No', pinned='left', width=50, minWidth=50, editable=False)
-            gb.configure_column('Name', pinned='left', width=150, minWidth=200, editable=False)
-
+            column_config: dict[str, Any] = {
+                "No": st.column_config.NumberColumn("No", width="small"),
+                "Name": st.column_config.TextColumn("Name"),
+            }
             for col in slots:
-                gb.configure_column(
+                column_config[col] = st.column_config.NumberColumn(
                     col,
-                    cellStyle=cell_style_js,
-                    minWidth=100,
-                    wrapHeaderText=True,
-                    autoHeaderHeight=True,
-                    filterable=False
+                    min_value=0,
+                    max_value=2,
+                    step=1,
+                    required=True,
                 )
 
-            gb.configure_grid_options(
-                rowHeight=35,
-                headerHeight=35,
-                rowNumbers = True # shows row index on the left
+            edited_availability_df = pd.DataFrame(
+                st.data_editor(
+                    st.session_state[availability_grid_state_key].copy(),
+                    key=availability_grid_key,
+                    hide_index=True,
+                    use_container_width=True,
+                    disabled=["No", "Name"],
+                    column_config=column_config,
+                )
             )
-
-            grid_response = AgGrid(
-                availability_df.copy(), # AgGrid mutates the df in-place
-                gridOptions=gb.build(),
-                allow_unsafe_jscode=True,
-                theme='streamlit',
-                fit_columns_on_grid_load=False,
-                height=min((len(availability_df) + 1) * 35 + 3, 600),
-                key=availability_grid_key,
-            )
-            st.caption(table_dimensions_caption(availability_df))
-            st.session_state.finalised_availability_df = normalize_editor_df(
-                pd.DataFrame(grid_response["data"]).drop(columns=[":autouniqueid:"], errors="ignore")[expected_columns]
-            )
+            st.caption(table_dimensions_caption(edited_availability_df))
+            for slot in slots:
+                edited_availability_df[slot] = (
+                    pd.to_numeric(edited_availability_df[slot], errors="coerce")
+                    .fillna(0)
+                    .astype(int)
+                    .clip(lower=0, upper=2)
+                )
+            edited_availability_df["No"] = range(1, len(edited_availability_df) + 1)
+            st.session_state[availability_grid_state_key] = edited_availability_df.copy()
+            st.session_state.finalised_availability_df = edited_availability_df
         except Exception as exc:
             st.session_state.pop("finalised_availability_df", None)
             st.error(f"Unable to build availability grid: {exc}")
@@ -980,6 +976,60 @@ elif st.session_state.step == 4:
             render_dataframe_with_dimensions(summary_df, hide_index=True)
         else:
             st.info("Generate a schedule to see results.")
+        
+        col1, col2 = st.columns(2)
+        col1.button("← Back", on_click=prev_step, use_container_width=True)
+        col2.button(
+            "Next →",
+            on_click=next_step,
+            use_container_width=True,
+            disabled=not bool(st.session_state.primary_result),
+        )
+
+elif st.session_state.step == 5:
+    st.header("Step 5: Export Results")
+
+    if not st.session_state.primary_result:
+        st.error("Please generate a primary schedule first.")
+    else:
+        primary_schedule_df = dataframe_from_rows(st.session_state.primary_result["schedule"])
+        reserve_schedule_dfs = [
+            dataframe_from_rows(reserve_result["schedule"])
+            for reserve_result in (st.session_state.reserve_results or {}).get("reserves", [])
+        ]
+        export_availability_df = st.session_state.get(
+            "corrected_availability_df",
+            st.session_state.finalised_availability_df,
+        )
+
+        try:
+            workbook_bytes = build_sample_workbook_bytes(
+                year=int(year),
+                month=int(month),
+                personnel_df=st.session_state.personnel_df,
+                availability_df=export_availability_df,
+                primary_schedule_df=primary_schedule_df,
+                reserve_schedule_dfs=reserve_schedule_dfs,
+                duty_points_df=st.session_state.final_duty_points_df,
+                reserve_points_df=st.session_state.final_reserve_points_df,
+                month_label=st.session_state.get("selected_month_name", MONTH_COLUMN_NAMES[int(month)]),
+            )
+            st.success("Workbook is ready for download.")
+            st.download_button(
+                label="Download Sample-Style Workbook",
+                data=workbook_bytes,
+                file_name=f"{calendar.month_name[int(month)].lower()}_{int(year)}_scheduler_export.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
+        except ImportError:
+            st.error("Excel export requires `openpyxl`. Install dependencies from `requirements.txt` and rerun the app.")
+        except Exception as exc:
+            st.error(f"Unable to generate export workbook: {exc}")
+
+        st.caption(
+            "The workbook includes a master overview sheet, send-out sheet, points sheet and personnel list."
+        )
 
     col1, col2 = st.columns(2)
     col1.button("← Back", on_click=prev_step, use_container_width=True)
