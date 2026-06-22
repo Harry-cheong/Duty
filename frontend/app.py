@@ -10,6 +10,7 @@ import pandas as pd
 import streamlit as st
 import json
 import gspread
+from google.oauth2.service_account import Credentials
 import re
 from collections import defaultdict
 
@@ -163,12 +164,22 @@ def highlight_special_days(row, weekend_color="#2C3A4A", holiday_color="#244B36"
 st.title("Totally Fair Scheduler")
 st.caption("Follow the steps to generate a new planning schedule")
 
-## Servie Email
-with open("../service-key.json") as f:
-    service_info = json.load(f)
+## Service Account Setup
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+@st.cache_resource
+def get_gspread_client() -> gspread.Client:
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"],
+        scopes=SCOPES,
+    )
+    return gspread.authorize(creds)
 
 ## Connecting to service account
-gc = gspread.service_account(filename="../service-key.json")
+gc = get_gspread_client()
 
 ## Progress indicator
 st.progress(st.session_state.step / num_steps)
@@ -177,7 +188,7 @@ st.write(f"Step {st.session_state.step} of {num_steps}")
 ## Progress Tabs
 if st.session_state.step == 1:
     st.header("Step 1: Connecting to Google Sheet")
-    st.text(f"Share spreadsheet with {service_info['client_email']}")
+    st.text(f"Share spreadsheet with {st.secrets.gcp_service_account.client_email}")
     isConnected = False
     attemptConnection = st.button("Connect")
 
