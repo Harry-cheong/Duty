@@ -5,6 +5,8 @@ import re
 from functools import lru_cache
 import holidays
 import pandas as pd
+import json
+
 MONTH_COLUMN_NAMES = {
     1: "JAN",
     2: "FEB",
@@ -37,11 +39,11 @@ def singapore_public_holiday_name(date_value: object) -> str:
 def build_slot_config(year: int, month: int) -> pd.DataFrame:
     _, last_day = calendar.monthrange(year, month)
     days = pd.date_range(f"{year}-{month:02d}-01", periods=last_day)
-    day_strings = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    day_strings = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     holiday_labels = [singapore_public_holiday_name(day) for day in days]
     return pd.DataFrame(
         {
-            "Date": [day.strftime("%d/%m/%Y") for day in days],
+            "Date": [day.strftime("%d-%m-%y") for day in days],
             "Day": [day_strings[day.weekday()] for day in days],
             "Holiday": [f"PH: {label}" if label else "" for label in holiday_labels],
             "Slot 1": [True for _ in range(len(days))],
@@ -51,6 +53,7 @@ def build_slot_config(year: int, month: int) -> pd.DataFrame:
 
 def slot_labels_from_config(config_df: pd.DataFrame) -> tuple[list[str], list[str]]:
     slots: list[str] = []
+    days: list[str] = []
     warning_slots: list[str] = []
     for _, row in config_df.iterrows():
         date = row["Date"]
@@ -58,13 +61,16 @@ def slot_labels_from_config(config_df: pd.DataFrame) -> tuple[list[str], list[st
         slot1 = bool(row["Slot 1"])
         slot2 = bool(row["Slot 2"])
         if slot1 and slot2:
-            slots.append(f"{date} {day} AM")
-            slots.append(f"{date} {day} PM")
+            slots.append(f"{date} (AM)")
+            days.append(day)
+            slots.append(f"{date} (PM)")
+            days.append(day)
         elif slot1:
-            slots.append(f"{date} {day}")
+            slots.append(f"{date}")
+            days.append(day)
         else:
             warning_slots.append(date)
-    return slots, warning_slots
+    return slots, days, warning_slots
 
 def build_availability_template(clerks_df: pd.DataFrame, slots: list[str]) -> pd.DataFrame:
     return pd.DataFrame(
@@ -76,147 +82,115 @@ def build_availability_template(clerks_df: pd.DataFrame, slots: list[str]) -> pd
     )
 
 
-def _split_csv_values(value: object) -> list[str]:
-    if pd.isna(value):
-        return []
-    return [item.strip() for item in str(value).split(",") if item.strip()]
-
-
-def _parse_unavailable_days(value: object, year: int, month: int) -> set[int]:
-    _, last_day = calendar.monthrange(year, month)
-    unavailable_days: set[int] = set()
-    for item in _split_csv_values(value):
-        match = re.search(r"\d+", item)
-        if not match:
+def _preferred_slots_for_token(tokens: str, slot_metadata: list[dict[str, object]]) -> set[str]:
+    tokens = json.loads(tokens)
+    slots = set()
+    if not tokens:
+        return set()
+    simple = [t for t in tokens if len(t.split()) == 1]
+    complex = [set(t.split()) for t in tokens if len(t.split()) == 2]
+    if any(token not in simple and token not in complex for token in tokens):
+        raise ValueError(f"Error parsing token '{tokens}'")
+    
+    # TODO: What if simple and complex tokens conflict?
+    for metadata in slot_metadata:
+        # Simple Tokens e.g. "Monday", "Tuesday", "Weekends", 11
+        if str(metadata["day"]) in simple or metadata["day_type"]in simple or metadata["day_name"] in simple:
+            slots.add(metadata["slot"])
             continue
-        day = int(match.group())
-        if 1 <= day <= last_day:
-            unavailable_days.add(day)
-    return unavailable_days
+        
+        # Complex Tokens e.g. "Weekends AM"
+        metadata_set = set([str(metadata["day"]), metadata["day_type"], metadata["day_name"]])
+        for t in complex:
+            if t.issubset(metadata_set):
+                slots.add(metadata["slot"])
+                break
+        
+    return slots
 
 
-def _slot_metadata(slot: str) -> dict[str, object]:
-    date_text = str(slot)[:10]
-    slot_date = pd.to_datetime(date_text, format="%d/%m/%Y")
-    suffix = None
-    if str(slot).endswith(" AM"):
-        suffix = "AM"
-    elif str(slot).endswith(" PM"):
-        suffix = "PM"
+def _slot_metadata(slot, slot_as_day) -> dict[str, object]:
+    # Expected slot format: dd/mm/yy (AM)
+    if len(slot.split()) > 1:
+        date, shift = slot.split()
+        shift = shift.replace("(", "").replace(")", "")
+    else:
+        date = slot
+        shift = None
+
+    _day, _month, _year = date.split("-")
+
+    if slot_as_day in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]:
+        day_type = "Weekdays"
+    else:
+        day_type = "Weekends"
+    
     return {
-        "slot": slot,
-        "date": slot_date,
-        "day_name": slot_date.day_name(),
-        "suffix": suffix,
+        "slot": slot, # dd/mm/yy (AM)
+        "date": date, # dd/mm/yy
+        "day": int(_day),
+        "day_type": day_type,
+        "shift": shift,
+        "day_name": slot_as_day
     }
-
-
-def _preferred_slots_for_token(token: str, slot_metadata: list[dict[str, object]]) -> set[str]:
-    normalized = " ".join(str(token).strip().lower().split())
-    if not normalized:
-        return set()
-
-    parts = normalized.split()
-    day_name = parts[0].capitalize() if parts else ""
-    suffix = parts[1].upper() if len(parts) > 1 else None
-    if day_name not in {
-        "Monday",
-        "Tuesday",
-        "Wednesday",
-        "Thursday",
-        "Friday",
-        "Saturday",
-        "Sunday",
-    }:
-        return set()
-
-    matched_slots: set[str] = set()
-    for item in slot_metadata:
-        if item["day_name"] != day_name:
-            continue
-        if suffix is None:
-            matched_slots.add(str(item["slot"]))
-            continue
-        item_suffix = item["suffix"]
-        if item_suffix == suffix:
-            matched_slots.add(str(item["slot"]))
-        elif item_suffix is None and day_name in {"Saturday", "Sunday"}:
-            matched_slots.add(str(item["slot"]))
-    return matched_slots
-
-
-def _latest_responses_by_name(input_df: pd.DataFrame) -> pd.DataFrame:
-    if input_df.empty:
-        return input_df
-
-    responses = input_df.copy()
-    responses["Timestamp"] = pd.to_datetime(
-        responses["Timestamp"],
-        dayfirst=True,
-        errors="coerce",
-    )
-    responses = responses.dropna(subset=["Your Name (Select from list)"])
-    responses["Your Name (Select from list)"] = responses["Your Name (Select from list)"].astype(str).str.strip()
-    responses = responses.sort_values("Timestamp")
-    return responses.drop_duplicates(subset=["Your Name (Select from list)"], keep="last")
-
 
 def build_availability_from_input(
     clerks_df: pd.DataFrame,
-    responses_df: pd.DataFrame,
+    response_df: pd.DataFrame,
     slots: list[str],
-    year: int,
-    month: int,
-) -> pd.DataFrame:
-    required_columns = {"Timestamp", "Your Name (Select from list)"}
-    missing_columns = sorted(required_columns - set(responses_df.columns))
-    if missing_columns:
-        raise ValueError(
-            "Availability input CSV is missing required columns: "
-            + ", ".join(missing_columns)
-        )
-    latest_responses = _latest_responses_by_name(responses_df)
+    slots_as_days: list[str],
+):
 
     availability_df = pd.DataFrame(
         {
-            "Name": clerks_df["Name"].astype(str).str.strip(),
+            "RANK & NAME": clerks_df["RANK & NAME"].astype(str).str.strip().reset_index(drop=True),
             **{slot: 1 for slot in slots},
         }
     )
-    slot_metadata = [_slot_metadata(slot) for slot in slots]
+    availability_df = availability_df.set_index("RANK & NAME")
 
-    response_lookup = latest_responses.set_index("Your Name (Select from list)") if not latest_responses.empty else None
+    slot_metadata = []
+    for s, d in zip(slots, slots_as_days):
+        slot_metadata.append(_slot_metadata(s, d))
 
-    for row_idx, clerk_name in enumerate(availability_df["Name"]):
-        if response_lookup is None or clerk_name not in response_lookup.index:
+    response_lookup = response_df.set_index("RANK & NAME") if not response_df.empty else None
+
+    for clerk_name in availability_df.index:
+        if clerk_name.strip() not in response_lookup.index: # Clerk has not indicated unavailable dates and preferrences
             continue
 
         response = response_lookup.loc[clerk_name]
         if isinstance(response, pd.DataFrame):
             response = response.iloc[-1]
 
-        preferred_tokens = _split_csv_values(response.get("Preferred Duty Days"))
-        unavailable_days = _parse_unavailable_days(response.get("Select unavailable dates"), year, month)
-
-        preferred_slots: set[str] = set()
-        for token in preferred_tokens:
-            preferred_slots.update(_preferred_slots_for_token(token, slot_metadata))
-
-        for slot in preferred_slots:
-            availability_df.loc[row_idx, slot] = 2
+        unavailable_days = response.get("Unavailable Dates")
+        
+        # Parse back from JSON string if needed
+        if isinstance(unavailable_days, str):
+            unavailable_days = json.loads(unavailable_days)
+        if not isinstance(unavailable_days, list):
+            unavailable_days = []
 
         for item in slot_metadata:
-            slot_date = item["date"]
-            if int(slot_date.day) in unavailable_days:
-                availability_df.loc[row_idx, str(item["slot"])] = 0
+            slot_date = item["day"]
+            if slot_date in unavailable_days:
+                availability_df.loc[clerk_name, str(item["slot"])] = 0
+        
+        preferrence_tokens = response.get("Preferrences")
+        preferred_slots = _preferred_slots_for_token(preferrence_tokens, slot_metadata)
 
-    return availability_for_solver(availability_df, slots)
+        for p in preferred_slots:
+            # Unavailable dates should take precedence over preferred dates
+            if int(availability_df.loc[clerk_name, p]) == 1:
+                availability_df.loc[clerk_name, p] = 2
 
+    return availability_df
 
 def grid_from_normalized_availability(availability_df: pd.DataFrame, slots: list[str]) -> pd.DataFrame:
     grid_df = availability_df[["Name", *slots]].copy()
     grid_df.insert(0, "No", range(1, len(grid_df) + 1))
     return grid_df
+
 
 def availability_for_solver(grid_df: pd.DataFrame, slots: list[str]) -> pd.DataFrame:
     availability_df = grid_df.copy()
@@ -232,48 +206,3 @@ def availability_for_solver(grid_df: pd.DataFrame, slots: list[str]) -> pd.DataF
 
     availability_df["Availability"] = (availability_df[slots] > 0).sum(axis=1)
     return availability_df[["Name", *slots, "Availability"]]
-
-def _load_points_by_suffix(
-    points_df: pd.DataFrame,
-    month: int,
-    monthly_obligation: float,
-    suffix: str,
-) -> pd.DataFrame:
-    if "Name" not in points_df.columns:
-        raise ValueError("Points CSV must include a 'Name' column.")
-
-    selected_month = int(month)
-    previous_months = [
-        f"{MONTH_COLUMN_NAMES.get(((selected_month - offset - 1) % 12) + 1)}_{suffix}"
-        for offset in range(1, 3)
-    ]
-    if any(month_name is None for month_name in previous_months):
-        raise ValueError(f"Unsupported month value: {month}")
-
-    missing_months = [month_name for month_name in previous_months if month_name not in points_df.columns]
-    if missing_months:
-        available_columns = ", ".join(str(column) for column in points_df.columns)
-        raise ValueError(
-            f"{', '.join(missing_months)} data is not found. "
-            f"Available columns: {available_columns}"
-        )
-
-    historical_points = points_df[previous_months]
-    cumulative_points_df = pd.DataFrame(
-        {
-            "Name": points_df["Name"].astype(str).str.strip(),
-            **{month_name: historical_points[month_name] for month_name in previous_months},
-            "Duty": historical_points.fillna(0).sum(axis=1),
-            "Obligation": monthly_obligation * (historical_points.notna().sum(axis=1) + 1),
-        }
-    )
-
-    return cumulative_points_df
-
-
-def load_duty_points(points_df: pd.DataFrame, month: int, monthly_obligation: float) -> pd.DataFrame:
-    return _load_points_by_suffix(points_df, month, monthly_obligation, "Duty")
-
-
-def load_reserve_points(points_df: pd.DataFrame, month: int, monthly_obligation: float) -> pd.DataFrame:
-    return _load_points_by_suffix(points_df, month, monthly_obligation, "Reserve")

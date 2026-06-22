@@ -8,15 +8,17 @@ from typing import Dict
 import pandas as pd
 from ortools.sat.python import cp_model
 
-from inputs import load_duty_points, load_reserve_points, singapore_public_holiday_name
+from inputs import singapore_public_holiday_name
 from models import ComplianceRow, ReserveScheduleResponse, ScheduleResult, ScheduleRow, SummaryRow
 
 
 AVAILABILITY_COLUMN = "Availability"
-NAME_COLUMN = "Name"
-DUTY_COLUMN = "Duty"
-OBLIGATION_COLUMN = "Obligation"
-PROJECTED_COLUMN = "Projected"
+DUTY_COLUMN = "H. Duty"
+RESERVE_COLUMN = "H. Reserve"
+OBLIGATION_DUTY_COLUMN = "O. Duty"
+OBLIGATION_RESERVE_COLUMN = "O. Reserve"
+PROJECTED_DUTY_COLUMN = "P. Duty"
+PROJECTED_RESERVE_COLUMN = "P. Reserve"
 
 
 @dataclass
@@ -27,53 +29,75 @@ class SchedulerConfig:
     use_random_seed: bool = True
 
 
+def _safe_int(value: object, default: int = 0) -> int:
+    if pd.isna(value):
+        return default
+    return int(value)
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    if pd.isna(value):
+        return default
+    return float(value)
+
+
 def _reset_rng(config: SchedulerConfig) -> random.Random:
     if config.use_random_seed:
         return random.Random(config.random_seed)
     return random.Random()
 
 
-def _slot_columns(availability_df: pd.DataFrame) -> list[str]:
-    availability_index = availability_df.columns.get_loc(AVAILABILITY_COLUMN)
-    return availability_df.columns[1:availability_index].tolist()
-
-
 def _prepare_planning_table(
     availability_df: pd.DataFrame,
     points_df: pd.DataFrame,
-) -> tuple[pd.DataFrame, list[str], list[str], list[str]]:
-    planning_table = availability_df.copy()
+) -> pd.DataFrame:
+    planning_table = availability_df.copy()  # "RANK & NAME" is the index
+
+    # Add AVAILABILITY_COLUMN
+    planning_table[AVAILABILITY_COLUMN] = (planning_table.iloc[:, 1:] != 0).sum(axis=1)
 
     excluded_df = planning_table[planning_table[AVAILABILITY_COLUMN] == 0]
-    excluded_clerks = excluded_df[NAME_COLUMN].tolist()
     planning_table = planning_table[planning_table[AVAILABILITY_COLUMN] > 0].copy()
-    clerks = planning_table[NAME_COLUMN].tolist()
 
-    point_names = set(points_df[NAME_COLUMN].tolist())
-    unmatched_clerks = [clerk for clerk in clerks if clerk not in point_names]
-    if unmatched_clerks:
-        planning_table = planning_table[~planning_table[NAME_COLUMN].isin(unmatched_clerks)].copy()
+    # Add DUTY_COLUMN, RESERVE_COLUMN, Active (Months)
+    for i, row in points_df.iterrows():
+        duty = 0
+        reserve = 0
+        active = 1  # Inclusive of the current planning month
+        for col in points_df.columns:
+            if "Duty" in col:
+                if pd.isna(points_df.loc[i, col]):  # If no duty record for the month, assume clerk is not active
+                    break
+                else:
+                    active += 1
+                    duty += points_df.loc[i, col]
 
-    planning_table = planning_table.merge(
-        points_df,
-        on=NAME_COLUMN,
-        how="left",
-        sort=False,
-    )
+            if "R1" in col or "R2" in col:
+                reserve += points_df.loc[i, col]
 
-    slot_columns = _slot_columns(availability_df)
-    return planning_table.reset_index(drop=True), slot_columns, excluded_clerks, unmatched_clerks
+        planning_table.loc[i, "Active (Months)"] = active
+        planning_table.loc[i, RESERVE_COLUMN] = reserve
+        planning_table.loc[i, DUTY_COLUMN] = duty
+
+    return planning_table
 
 
-def _project_duties(planning_table: pd.DataFrame, duty_target: int, rng: random.Random) -> pd.DataFrame:
-    planning_table[PROJECTED_COLUMN] = 0
+def _project_duties(
+    duty_col: str,
+    obligation_col: str,
+    projected_col: str,
+    planning_table: pd.DataFrame,
+    duty_target: int,
+    rng: random.Random,
+) -> pd.DataFrame:
+    planning_table[projected_col] = 0
     heap = [
         (
-            -(float(row[OBLIGATION_COLUMN]) - float(row[DUTY_COLUMN])),
+            -(_safe_float(row[obligation_col]) - _safe_float(row[duty_col])),
             rng.random(),
-            row[NAME_COLUMN],
+            idx,
         )
-        for _, row in planning_table.iterrows()
+        for idx, row in planning_table.iterrows()
     ]
     heapq.heapify(heap)
 
@@ -81,66 +105,107 @@ def _project_duties(planning_table: pd.DataFrame, duty_target: int, rng: random.
         if not heap:
             break
         _, _, name = heapq.heappop(heap)
-        row_index = planning_table.index[planning_table[NAME_COLUMN] == name].item()
-        planning_table.loc[row_index, PROJECTED_COLUMN] += 1
-        row = planning_table.loc[row_index]
+        planning_table.loc[name, projected_col] += 1
+        row = planning_table.loc[name]
         remaining_gap = (
-            float(row[OBLIGATION_COLUMN])
-            - float(row[DUTY_COLUMN])
-            - float(row[PROJECTED_COLUMN])
+            _safe_float(row[obligation_col])
+            - _safe_float(row[duty_col])
+            - _safe_float(row[projected_col])
         )
         heapq.heappush(heap, (-remaining_gap, rng.random(), name))
 
-    planning_table["Monthly Duty Points"] = 0
     return planning_table
 
 
-def _apply_existing_projection(planning_table: pd.DataFrame, duty_target: int) -> pd.DataFrame:
-    planning_table[PROJECTED_COLUMN] = (
-        pd.to_numeric(planning_table[PROJECTED_COLUMN], errors="coerce")
-        .fillna(0)
-        .astype(int)
-    )
-    planning_table["Monthly Duty Points"] = 0
-    return planning_table
-
-
-def project_duties_preview(
+def generate_planning_table(
     availability_df: pd.DataFrame,
     points_df: pd.DataFrame,
     config: SchedulerConfig,
+    duty_obligation: float,
+    reserve_obligation: float,
     num_slots: int,
-) -> pd.DataFrame:
-    planning_table, _, _, _ = _prepare_planning_table(
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    planning_table = _prepare_planning_table(
         availability_df=availability_df,
         points_df=points_df,
     )
     rng = _reset_rng(config)
-    
-    planning_table = _project_duties(planning_table, num_slots, rng)
-   
-    historical_columns = [
-        column
-        for column in points_df.columns
-        if column not in {NAME_COLUMN, DUTY_COLUMN, OBLIGATION_COLUMN}
-    ]
+    planning_table[OBLIGATION_DUTY_COLUMN] = planning_table["Active (Months)"] * duty_obligation
+    planning_table[OBLIGATION_RESERVE_COLUMN] = planning_table["Active (Months)"] * reserve_obligation
+
+    planning_table = _project_duties(PROJECTED_DUTY_COLUMN, OBLIGATION_DUTY_COLUMN, PROJECTED_DUTY_COLUMN, planning_table, num_slots, rng)
+    planning_table = _project_duties(PROJECTED_RESERVE_COLUMN, OBLIGATION_RESERVE_COLUMN, PROJECTED_RESERVE_COLUMN, planning_table, num_slots * 2, rng)
+
     preview_df = planning_table[
-        [NAME_COLUMN, *historical_columns, DUTY_COLUMN, OBLIGATION_COLUMN, PROJECTED_COLUMN]
+        ["Active (Months)", DUTY_COLUMN, RESERVE_COLUMN, OBLIGATION_DUTY_COLUMN, OBLIGATION_RESERVE_COLUMN]
     ].copy()
-    preview_df["Total"] = preview_df[DUTY_COLUMN] + preview_df[PROJECTED_COLUMN]
-    preview_df["Difference"] = preview_df["Total"] - preview_df[OBLIGATION_COLUMN]
-    return preview_df
+
+    projected_df = planning_table[
+        [PROJECTED_DUTY_COLUMN, PROJECTED_RESERVE_COLUMN]
+    ]
+
+    return planning_table, preview_df, projected_df
 
 
 def _parse_slot_date(slot_label: str) -> pd.Timestamp:
-    return pd.to_datetime(str(slot_label)[:10], format="%d/%m/%Y")
+    return pd.to_datetime(slot_label.split()[0], format="%d-%m-%y")
+
+
+def _get_prior_assigned_dates(
+    planning_table: pd.DataFrame,
+    slots: list[str],
+) -> dict[str, list[pd.Timestamp]]:
+    """
+    Return dates (as Timestamps) where each clerk is already assigned (value == 3).
+    Used to enforce min_gap_days against assignments from prior rounds.
+    """
+    prior: dict[str, list[pd.Timestamp]] = {}
+    for clerk in planning_table.index:
+        assigned_dates = []
+        for slot in slots:
+            if slot in planning_table.columns and _safe_int(planning_table.at[clerk, slot]) == 3:
+                assigned_dates.append(_parse_slot_date(slot))
+        prior[clerk] = assigned_dates
+    return prior
+
+
+def _get_slot_assignment_counts(
+    planning_table: pd.DataFrame,
+    slots: list[str],
+) -> dict[str, int]:
+    """
+    Count how many clerks are already assigned (value == 3) per slot.
+    Each slot can hold up to 3 assignments: 1 duty + 1 R1 + 1 R2.
+    """
+    return {
+        slot: int((planning_table[slot] == 3).sum())
+        for slot in slots
+        if slot in planning_table.columns
+    }
+
+
+def _zero_out_assigned_clerks(
+    planning_table: pd.DataFrame,
+    slots: list[str],
+) -> pd.DataFrame:
+    """
+    For each slot, zero out clerks already assigned (value == 3) so the model
+    cannot re-assign the same clerk to the same slot in a subsequent round.
+    """
+    table = planning_table.copy()
+    for slot in slots:
+        if slot in table.columns:
+            table.loc[table[slot] == 3, slot] = 0
+    return table
 
 
 def _build_schedule_model(
+    projected_column: str,
     planning_table: pd.DataFrame,
     slots: list[str],
     strict: bool,
     min_gap_days: int,
+    prior_assigned_dates: dict[str, list[pd.Timestamp]] | None = None,
 ) -> tuple[
     cp_model.CpModel,
     Dict[tuple[str, str], cp_model.IntVar],
@@ -150,35 +215,52 @@ def _build_schedule_model(
     cp_model.LinearExpr,
 ]:
     model = cp_model.CpModel()
-    clerk_names = planning_table[NAME_COLUMN].tolist()
+    clerk_names = planning_table.index.tolist()
+    prior_assigned_dates = prior_assigned_dates or {}
+
     projected_load = {
-        row[NAME_COLUMN]: int(row[PROJECTED_COLUMN])
-        for _, row in planning_table.iterrows()
+        idx: _safe_int(row[projected_column])
+        for idx, row in planning_table.iterrows()
     }
     is_available = {
-        row[NAME_COLUMN]: {slot: int(row[slot]) for slot in slots}
-        for _, row in planning_table.iterrows()
+        idx: {slot: _safe_int(row[slot]) for slot in slots}
+        for idx, row in planning_table.iterrows()
     }
     slot_dates = {slot: _parse_slot_date(slot) for slot in slots}
     weekend_slots = [slot for slot in slots if slot_dates[slot].weekday() >= 5]
     weekend_preference = {
-        row[NAME_COLUMN]: {
-            slot: 1 if slot in weekend_slots and int(row[slot]) == 2 else 0
+        idx: {
+            slot: 1 if slot in weekend_slots and _safe_int(row[slot]) == 2 else 0
             for slot in slots
         }
-        for _, row in planning_table.iterrows()
+        for idx, row in planning_table.iterrows()
     }
 
+    # Decision variables
     x: Dict[tuple[str, str], cp_model.IntVar] = {}
     for clerk in clerk_names:
+        clerk_prior_dates = prior_assigned_dates.get(clerk, [])
         for slot in slots:
             x[clerk, slot] = model.NewBoolVar(f"assign_{clerk}_{slot}")
+
+            # Block if unavailable (0 in availability matrix)
             if not is_available[clerk][slot]:
                 model.Add(x[clerk, slot] == 0)
+                continue
 
+            # Block if this slot is too close to any prior-round assignment
+            slot_date = slot_dates[slot]
+            if any(
+                abs((slot_date - prior_date).days) < min_gap_days
+                for prior_date in clerk_prior_dates
+            ):
+                model.Add(x[clerk, slot] == 0)
+
+    # Each slot must have exactly one clerk assigned
     for slot in slots:
         model.Add(sum(x[clerk, slot] for clerk in clerk_names) == 1)
 
+    # Per-clerk duty count constraints
     total_duties: Dict[str, cp_model.IntVar] = {}
     projected_diff: Dict[str, cp_model.IntVar] = {}
     for clerk in clerk_names:
@@ -190,9 +272,20 @@ def _build_schedule_model(
             projected_diff[clerk] = model.NewIntVar(0, len(slots), f"projected_diff_{clerk}")
             model.AddAbsEquality(projected_diff[clerk], total_duties[clerk] - projected_load[clerk])
 
+    # Within-round gap constraints
     gap_violations: list[cp_model.IntVar] = []
     for clerk in clerk_names:
+        clerk_prior_dates = prior_assigned_dates.get(clerk, [])
         for i, slot in enumerate(slots):
+            slot_date = slot_dates[slot]
+
+            # Skip slots already hard-blocked above
+            if not is_available[clerk][slot]:
+                continue
+            if any(abs((slot_date - prior_date).days) < min_gap_days for prior_date in clerk_prior_dates):
+                continue
+
+            # Collect within-round conflicting slots (too close together)
             conflicting_slots = [slot]
             j = i + 1
             while j < len(slots):
@@ -208,12 +301,13 @@ def _build_schedule_model(
                 continue
 
             if strict:
-                model.Add(sum(x[clerk, current_slot] for current_slot in conflicting_slots) <= 1)
+                model.Add(sum(x[clerk, s] for s in conflicting_slots) <= 1)
             else:
                 violation = model.NewIntVar(0, len(conflicting_slots) - 1, f"gap_violation_{clerk}_{i}")
-                model.Add(violation >= sum(x[clerk, current_slot] for current_slot in conflicting_slots) - 1)
+                model.Add(violation >= sum(x[clerk, s] for s in conflicting_slots) - 1)
                 gap_violations.append(violation)
 
+    # Weekend balance
     weekend_count: Dict[str, cp_model.IntVar] = {}
     preferred_weekend_assignments = []
     for clerk in clerk_names:
@@ -247,17 +341,21 @@ def _build_schedule_model(
 
 
 def _solve_schedule(
+    projected_column: str,
     planning_table: pd.DataFrame,
     slots: list[str],
     min_gap_days: int,
     time_limit_seconds: int,
+    prior_assigned_dates: dict[str, list[pd.Timestamp]] | None = None,
 ):
     for strict in (True, False):
         model, x, total_duties, weekend_count, weekend_imbalance, preferred_weekend_total = _build_schedule_model(
+            projected_column,
             planning_table=planning_table,
             slots=slots,
             strict=strict,
             min_gap_days=min_gap_days,
+            prior_assigned_dates=prior_assigned_dates,
         )
         solver = cp_model.CpSolver()
         solver.parameters.max_time_in_seconds = time_limit_seconds
@@ -276,12 +374,14 @@ def _solve_schedule(
     raise ValueError("No feasible schedule found, even after fallback.")
 
 
-def _build_compliance_rows(schedule_rows: list[ScheduleRow], planning_table: pd.DataFrame) -> list[ComplianceRow]:
-    availability_lookup = planning_table.set_index(NAME_COLUMN)
+def _build_compliance_rows(
+    schedule_rows: list[ScheduleRow],
+    planning_table: pd.DataFrame,
+) -> list[ComplianceRow]:
     report_rows: list[ComplianceRow] = []
 
     for row in schedule_rows:
-        if row.assigned_clerk not in availability_lookup.index:
+        if row.assigned_clerk not in planning_table.index:
             report_rows.append(
                 ComplianceRow(
                     date=row.date,
@@ -293,7 +393,7 @@ def _build_compliance_rows(schedule_rows: list[ScheduleRow], planning_table: pd.
             )
             continue
 
-        if row.date not in availability_lookup.columns:
+        if row.date not in planning_table.columns:
             report_rows.append(
                 ComplianceRow(
                     date=row.date,
@@ -305,7 +405,7 @@ def _build_compliance_rows(schedule_rows: list[ScheduleRow], planning_table: pd.
             )
             continue
 
-        availability_value = int(availability_lookup.at[row.assigned_clerk, row.date])
+        availability_value = _safe_int(planning_table.at[row.assigned_clerk, row.date])
         report_rows.append(
             ComplianceRow(
                 date=row.date,
@@ -318,40 +418,33 @@ def _build_compliance_rows(schedule_rows: list[ScheduleRow], planning_table: pd.
 
     return report_rows
 
+
 def generate_schedule(
-    availability_df: pd.DataFrame,
-    points_df: pd.DataFrame,
+    projected_column: str,
+    slots: list[str],
+    planning_table: pd.DataFrame,
     config: SchedulerConfig,
-    availability_override: pd.DataFrame | None = None,
 ) -> tuple[ScheduleResult, pd.DataFrame]:
-    if availability_override is not None:
-        availability_df = availability_override.copy()
+    duty_planning_table = planning_table.copy()
 
-    planning_table, slots, excluded_clerks, unmatched_clerks = _prepare_planning_table(
-        availability_df=availability_df,
-        points_df=points_df,
-    )
-    if planning_table.empty:
+    if duty_planning_table.empty:
         raise ValueError("No schedulable clerks remain after filtering availability and points.")
-    if not slots:
-        raise ValueError("No duty slots are configured.")
 
-    duty_target = len(slots)
-    if PROJECTED_COLUMN in planning_table.columns:
-        planning_table = _apply_existing_projection(planning_table, duty_target)
-    else:
-        rng = _reset_rng(config)
-        planning_table = _project_duties(planning_table, duty_target, rng)
+    # Read prior assignments (value == 3) so gap constraints respect all previous rounds
+    prior_assigned_dates = _get_prior_assigned_dates(duty_planning_table, slots)
 
     mode, solver, x, total_duties, weekend_count, weekend_imbalance, preferred_weekend_total = _solve_schedule(
-        planning_table=planning_table,
+        projected_column=projected_column,
+        planning_table=duty_planning_table,
         slots=slots,
         min_gap_days=config.min_gap_days,
         time_limit_seconds=config.time_limit_seconds,
+        prior_assigned_dates=prior_assigned_dates,
     )
 
     slot_dates = {slot: _parse_slot_date(slot) for slot in slots}
-    clerk_names = planning_table[NAME_COLUMN].tolist()
+    clerk_names = duty_planning_table.index.tolist()
+
     schedule_rows: list[ScheduleRow] = []
     for slot in slots:
         holiday_name = singapore_public_holiday_name(slot_dates[slot])
@@ -367,188 +460,112 @@ def generate_schedule(
 
     weekend_slots = [slot for slot in slots if slot_dates[slot].weekday() >= 5]
     weekend_preference = {
-        row[NAME_COLUMN]: {
-            slot: 1 if slot in weekend_slots and int(row[slot]) == 2 else 0
+        idx: {
+            slot: 1 if slot in weekend_slots and _safe_int(row[slot]) == 2 else 0
             for slot in slots
         }
-        for _, row in planning_table.iterrows()
+        for idx, row in duty_planning_table.iterrows()
     }
+
     summary_rows = [
         SummaryRow(
             name=clerk,
-            projected=int(planning_table.loc[planning_table[NAME_COLUMN] == clerk, PROJECTED_COLUMN].iloc[0]),
+            projected=_safe_int(duty_planning_table.loc[clerk, projected_column]),
             assigned=solver.Value(total_duties[clerk]),
-            projected_delta=solver.Value(total_duties[clerk])
-            - int(planning_table.loc[planning_table[NAME_COLUMN] == clerk, PROJECTED_COLUMN].iloc[0]),
+            projected_delta=solver.Value(total_duties[clerk]) - _safe_int(duty_planning_table.loc[clerk, projected_column]),
             weekend_duties=solver.Value(weekend_count[clerk]),
             preferred_weekend_slots=sum(weekend_preference[clerk][slot] for slot in weekend_slots),
         )
         for clerk in clerk_names
     ]
-    summary_rows.sort(key=lambda row: (-row.assigned, -row.weekend_duties, row.name))
 
-    compliance_rows = _build_compliance_rows(schedule_rows, planning_table)
+    compliance_rows = _build_compliance_rows(schedule_rows, duty_planning_table)
 
+    # Mark assignments on the planning table: summary column and slot cells
     for item in summary_rows:
-        row_idx = planning_table.index[planning_table[NAME_COLUMN] == item.name].item()
-        planning_table.loc[row_idx, "Monthly Duty Points"] = item.assigned
-
+        duty_planning_table.loc[item.name, "Duty"] = item.assigned
     for item in schedule_rows:
-        row_idx = planning_table.index[planning_table[NAME_COLUMN] == item.assigned_clerk].item()
-        planning_table.loc[row_idx, item.date] = 3
+        duty_planning_table.loc[item.assigned_clerk, item.date] = 3
 
     result = ScheduleResult(
         mode=mode,
         weekend_imbalance=solver.Value(weekend_imbalance),
         preferred_weekend_assignments=solver.Value(preferred_weekend_total),
-        projected_total=int(planning_table[PROJECTED_COLUMN].sum()),
+        projected_total=int(duty_planning_table[projected_column].sum()),
         assigned_total=sum(row.assigned for row in summary_rows),
-        excluded_clerks=excluded_clerks,
-        unmatched_clerks=unmatched_clerks,
         schedule=schedule_rows,
         summary=summary_rows,
         compliance=compliance_rows,
     )
-    return result, planning_table
-
-
-def apply_reserve_round(planning_table: pd.DataFrame, schedule_rows: list[ScheduleRow]) -> pd.DataFrame:
-    slot_columns = _slot_columns(planning_table)
-    next_availability = planning_table[[NAME_COLUMN, *slot_columns, AVAILABILITY_COLUMN]].copy()
-    for item in schedule_rows:
-        row_idx = next_availability.index[next_availability[NAME_COLUMN] == item.assigned_clerk].item()
-        next_availability.loc[row_idx, item.date] = 0
-    next_availability[AVAILABILITY_COLUMN] = (next_availability[slot_columns] > 0).sum(axis=1)
-    return next_availability
-
-
-def apply_schedule_to_availability(
-    availability_df: pd.DataFrame,
-    schedule_rows: list[ScheduleRow],
-) -> pd.DataFrame:
-    next_availability = availability_df.copy()
-    slot_columns = _slot_columns(next_availability)
-    for item in schedule_rows:
-        row_idx = next_availability.index[next_availability[NAME_COLUMN] == item.assigned_clerk].item()
-        next_availability.loc[row_idx, item.date] = 0
-    next_availability[AVAILABILITY_COLUMN] = (next_availability[slot_columns] > 0).sum(axis=1)
-    return next_availability
-
-
-def _consume_projected_points(points_df: pd.DataFrame, schedule_result: ScheduleResult) -> pd.DataFrame:
-    next_points_df = points_df.copy()
-    if PROJECTED_COLUMN not in next_points_df.columns:
-        return next_points_df
-
-    assigned_lookup = {row.name: int(row.assigned) for row in schedule_result.summary}
-    next_points_df[NAME_COLUMN] = next_points_df[NAME_COLUMN].astype(str).str.strip()
-    next_points_df[PROJECTED_COLUMN] = (
-        pd.to_numeric(next_points_df[PROJECTED_COLUMN], errors="coerce")
-        .fillna(0)
-        .astype(int)
-    )
-    next_points_df[PROJECTED_COLUMN] = next_points_df.apply(
-        lambda row: max(int(row[PROJECTED_COLUMN]) - assigned_lookup.get(str(row[NAME_COLUMN]).strip(), 0), 0),
-        axis=1,
-    )
-    return next_points_df
-
-
-def _reserve_round_points(points_df: pd.DataFrame, duty_target: int) -> pd.DataFrame:
-    round_points_df = points_df.copy()
-    if PROJECTED_COLUMN not in round_points_df.columns:
-        return round_points_df
-
-    remaining_projection = (
-        pd.to_numeric(round_points_df[PROJECTED_COLUMN], errors="coerce")
-        .fillna(0)
-        .astype(int)
-    )
-    round_projection = pd.Series(0, index=round_points_df.index, dtype=int)
-
-    for _ in range(duty_target):
-        candidates = remaining_projection[remaining_projection > 0]
-        if candidates.empty:
-            break
-        next_index = candidates.idxmax()
-        round_projection.at[next_index] += 1
-        remaining_projection.at[next_index] -= 1
-
-    round_points_df[PROJECTED_COLUMN] = round_projection
-    return round_points_df
+    return result, duty_planning_table
 
 
 def generate_schedule_from_inputs(
-    availability_df: pd.DataFrame,
-    points_df: pd.DataFrame,
-    month: int,
-    monthly_obligation: float,
+    planning_table: pd.DataFrame,
     config: SchedulerConfig,
-    points_df_override: pd.DataFrame | None = None,
-) -> ScheduleResult:
-    points_df = (
-        points_df_override.copy()
-        if points_df_override is not None
-        else load_duty_points(points_df, month, monthly_obligation)
+    slots: list[str],
+) -> tuple[ScheduleResult, pd.DataFrame]:
+    return generate_schedule(
+        projected_column=PROJECTED_DUTY_COLUMN,
+        planning_table=planning_table,
+        config=config,
+        slots=slots,
     )
-    result, _ = generate_schedule(availability_df=availability_df, points_df=points_df, config=config)
-    return result
 
 
 def generate_reserve_schedules_from_inputs(
-    availability_df: pd.DataFrame,
-    points_df: pd.DataFrame,
-    month: int,
-    monthly_obligation: float,
-    reserve_monthly_obligation: float | None,
+    planning_table: pd.DataFrame,
     config: SchedulerConfig,
-    reserve_rounds: int,
-    points_df_override: pd.DataFrame | None = None,
-    reserve_points_df_override: pd.DataFrame | None = None,
-    primary_result_override: ScheduleResult | None = None,
+    slots: list[str],
+    reserve_rounds: int = 2,  # 2 = R1 + R2
 ) -> ReserveScheduleResponse:
-    primary_points_df = (
-        points_df_override.copy()
-        if points_df_override is not None
-        else load_duty_points(points_df, month, monthly_obligation)
-    )
-    reserve_points_df = (
-        reserve_points_df_override.copy()
-        if reserve_points_df_override is not None
-        else load_reserve_points(
-            points_df,
-            month,
-            monthly_obligation if reserve_monthly_obligation is None else reserve_monthly_obligation,
-        )
-    )
-    if primary_result_override is not None:
-        primary = primary_result_override
-        current_availability = apply_schedule_to_availability(availability_df, primary.schedule)
-    else:
-        primary, planning_table = generate_schedule(
-            availability_df=availability_df,
-            points_df=primary_points_df,
-            config=config,
-        )
-        current_availability = apply_reserve_round(planning_table, primary.schedule)
+    """
+    Generate reserve schedules in sequential rounds (R1, then R2).
 
-    reserves: list[ScheduleResult] = []
-    current_reserve_points = reserve_points_df.copy()
-    for _ in range(reserve_rounds):
-        if PROJECTED_COLUMN in current_reserve_points.columns and int(current_reserve_points[PROJECTED_COLUMN].sum()) <= 0:
+    Each slot supports up to 3 occupants: 1 duty + 1 R1 + 1 R2.
+    A clerk already assigned to a slot (value == 3) is excluded from that slot
+    in subsequent rounds. The min_gap_days constraint is enforced against ALL
+    prior assignments — duty and reserve — across all rounds.
+
+    Args:
+        planning_table: The planning table after generate_schedule_from_inputs
+                        has been called (duty assignments already marked as 3).
+        config:         Scheduler configuration.
+        slots:          Full list of slot labels for the month.
+        reserve_rounds: Number of reserve rounds to run (default 2 for R1 + R2).
+    """
+    current_planning_table = planning_table.copy()
+    reserve_results: list[ScheduleResult] = []
+
+    for round_index in range(reserve_rounds):
+        slot_counts = _get_slot_assignment_counts(current_planning_table, slots)
+
+        # Round 0 (R1) needs slots with exactly 1 prior assignment (the duty clerk).
+        # Round 1 (R2) needs slots with exactly 2 prior assignments (duty + R1).
+        required_prior = round_index + 1
+        open_slots = [
+            slot for slot in slots
+            if slot_counts.get(slot, 0) == required_prior
+        ]
+
+        if not open_slots:
             break
-        round_reserve_points = _reserve_round_points(
-            current_reserve_points,
-            len(_slot_columns(current_availability)),
-        )
-        reserve_result, reserve_planning_table = generate_schedule(
-            availability_df=availability_df,
-            points_df=round_reserve_points,
-            config=config,
-            availability_override=current_availability,
-        )
-        reserves.append(reserve_result)
-        current_availability = apply_reserve_round(reserve_planning_table, reserve_result.schedule)
-        current_reserve_points = _consume_projected_points(current_reserve_points, reserve_result)
 
-    return ReserveScheduleResponse(primary=primary, reserves=reserves)
+        # Zero out already-assigned clerks per slot so the model won't re-pick them
+        round_table = _zero_out_assigned_clerks(current_planning_table, open_slots)
+
+        reserve_result, round_table = generate_schedule(
+            projected_column=PROJECTED_RESERVE_COLUMN,
+            planning_table=round_table,
+            config=config,
+            slots=open_slots,
+        )
+        reserve_results.append(reserve_result)
+
+        # Propagate new assignments (3s) back onto current_planning_table so that:
+        # (a) the next reserve round sees the correct slot counts
+        # (b) _get_prior_assigned_dates picks them up for gap enforcement
+        for item in reserve_result.schedule:
+            current_planning_table.loc[item.assigned_clerk, item.date] = 3
+
+    return ReserveScheduleResponse(reserves=reserve_results)

@@ -1,6 +1,6 @@
 # Frontend
 
-Single-user Streamlit desktop app for the scheduler.
+Single-user Streamlit app with live sync to google sheet
 
 ## Install
 

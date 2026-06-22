@@ -39,8 +39,6 @@ class ScheduleResult:
     preferred_weekend_assignments: int
     projected_total: int
     assigned_total: int
-    excluded_clerks: list[str]
-    unmatched_clerks: list[str]
     schedule: list[ScheduleRow]
     summary: list[SummaryRow]
     compliance: list[ComplianceRow]
@@ -51,5 +49,4 @@ class ScheduleResult:
 
 @dataclass
 class ReserveScheduleResponse:
-    primary: ScheduleResult
     reserves: list[ScheduleResult]
