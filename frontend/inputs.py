@@ -173,7 +173,11 @@ def build_availability_from_input(
 
         for item in slot_metadata:
             slot_date = item["day"]
-            if slot_date in unavailable_days:
+            slot_type = item["day_type"]
+            slot_day_name = item["day_name"]
+
+            # Indicate Unavailabilies
+            if slot_date in unavailable_days or slot_type in unavailable_days or slot_day_name in unavailable_days:
                 availability_df.loc[clerk_name, str(item["slot"])] = 0
         
         preferrence_tokens = response.get("Preferrences")

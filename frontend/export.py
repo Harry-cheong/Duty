@@ -6,11 +6,7 @@ class GSheet():
         self.ws = ws
 
         self.batch_requests = [] # Store all the requests to execute as one API call
-    
-    
-    def rgb(self, red, green, blue):
-        return {"red": round(red/255, 3), "green": round(green/255, 3), "blue": round(blue/255, 3)}
-    
+
 
     def set_width(self, start_col: int, size: int, end_col: int = None):
         if not end_col: end_col = start_col + 1
@@ -26,7 +22,7 @@ class GSheet():
                 "fields": "pixelSize"
              }
         })
-    
+
 
     def set_auto_width(self, start_col: int, end_col: int = None):
         if not end_col: end_col = start_col + 1
@@ -40,7 +36,7 @@ class GSheet():
                 }
             }
         })
-    
+
 
     def freeze(self, cols: int = None, rows: int = None):
         _grid_properties = {}
@@ -63,7 +59,7 @@ class GSheet():
                 "fields": _fields
             }
         })
-    
+
 
     def set_height(self, start_row: int, size: int, end_row: int = None):
         if not end_row: end_row = start_row+1
@@ -82,6 +78,7 @@ class GSheet():
             }
         })
     
+
     def col_letter(self, n):
         '''Convert 0-indexed column number to spreadsheet letter (0=A, 1=B, ...)'''
         result = ""
@@ -147,6 +144,28 @@ class GSheet():
                 "fields": "userEnteredFormat(backgroundColor,textFormat.bold,horizontalAlignment,wrapStrategy,verticalAlignment)"
             }
         })
+
+    
+    def set_border(self, start_row=None, start_col=None, end_row=None, end_col=None):
+        self.batch_requests.append(
+            {
+                "updateBorders": {
+                    "range": {
+                        "sheetId": self.ws.id,
+                        "startRowIndex": start_row,
+                        "endRowIndex": end_row,        # exclusive
+                        "startColumnIndex": start_col,
+                        "endColumnIndex": end_col,     # exclusive
+                    },
+                    "top":    {"style": "SOLID", "width": 1},
+                    "bottom": {"style": "SOLID", "width": 1},
+                    "left":   {"style": "SOLID", "width": 1},
+                    "right":  {"style": "SOLID", "width": 1},
+                    "innerHorizontal": {"style": "SOLID", "width": 1},
+                    "innerVertical":   {"style": "SOLID", "width": 1},
+                }
+            }
+        )
 
     
     def execute_req(self):

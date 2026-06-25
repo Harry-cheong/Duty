@@ -133,6 +133,11 @@ def render_result(result: dict[str, Any], heading: str) -> None:
         else:
             render_dataframe_with_dimensions(compliance_df, hide_index=True)
 
+
+def rgb(red, green, blue):
+    return {"red": round(red/255, 3), "green": round(green/255, 3), "blue": round(blue/255, 3)}
+
+
 ## Defaults ##
 today = dt.datetime.today()
 default_year = today.year if today.month < 12 else today.year + 1
@@ -283,6 +288,7 @@ elif st.session_state.step == 2:
         master_ws = sh.add_worksheet(title=new_sheet_title, rows=100, cols=5+len(st.session_state.slots))
         st.session_state.mastersheetf = msf = GSheet(sh, master_ws)
 
+        ## Duty Sheet Overview
         # Last Cell on the first row
         last_cell = master_ws.cell(1, 5+slot_count)
         last_col_address = last_cell.address.rstrip('1')
@@ -293,14 +299,17 @@ elif st.session_state.step == 2:
         cols = []
 
         row_idx = 3
-        for clerk in st.session_state.updated_personnel_df["RANK & NAME"]:
+        for i, row in st.session_state.updated_personnel_df.iterrows():
+            clerk = row["RANK & NAME"]
             cols.append([clerk] + [
                 0,
                 f"=SUM(F{row_idx}:{last_col_address + str(row_idx)})",
                 f"=ArrayFormula(SUM(IF(F{row_idx}:{last_col_address + str(row_idx)}=\"R\",1,0)))",
-                f"=ArrayFormula(SUM(IF(F{row_idx}:{last_col_address + str(row_idx)}=\"R1\",1,0)))",
+                f"=ArrayFormula(SUM(IF(F{row_idx}:{last_col_address + str(row_idx)}=\"R2\",1,0)))",
                 ])
+
             row_idx += 1
+            
         
         # MetaData Columns
         cols.append(["Total", "", f"=SUM(F{row_idx}:{last_col_address + str(row_idx)})"])
@@ -319,7 +328,7 @@ elif st.session_state.step == 2:
         msf.set_height(0, 35, end_row=2) # Set Row 1:2 to height 35
         msf.merge_cells(0, 0, end_row=2, end_col=5, merge_type="MERGE_COLUMNS") # Merge A1:E2
         msf.format_cells(start_row=0, end_row=2, horiz_align="CENTER", wrap="WRAP") # Set Rows to wrap-text and center align
-        msf.format_cells(start_row=0, start_col=0, end_row=2, end_col=5, fill_colour=msf.rgb(109, 158, 235), bold=True, horiz_align="CENTER", wrap="WRAP") # Format Cell A1:E2
+        msf.format_cells(start_row=0, start_col=0, end_row=2, end_col=5, fill_colour=rgb(109, 158, 235), bold=True, horiz_align="CENTER", wrap="WRAP") # Format Cell A1:E2
 
         # Slots
         master_ws.update(range_name="F1", values=[st.session_state.slots_as_days, st.session_state.slots])
@@ -330,7 +339,7 @@ elif st.session_state.step == 2:
                                     end_row=row+1,
                                     start_col=col+i,
                                     end_col=col+i+1,
-                                    fill_colour=msf.rgb(255, 255, 0), 
+                                    fill_colour=rgb(255, 255, 0), 
                                     horiz_align="CENTER", 
                                     wrap="WRAP")
 
@@ -339,7 +348,7 @@ elif st.session_state.step == 2:
                                     end_row=row+1,
                                     start_col=col+i,
                                     end_col=col+i+1,
-                                    fill_colour=msf.rgb(255, 0, 0), 
+                                    fill_colour=rgb(255, 0, 0), 
                                     horiz_align="CENTER", 
                                     wrap="WRAP")
                 
@@ -348,33 +357,171 @@ elif st.session_state.step == 2:
                                     end_row=row+1,
                                     start_col=col+i,
                                     end_col=col+i+1,
-                                    fill_colour=msf.rgb(52, 168, 83), 
+                                    fill_colour=rgb(52, 168, 83), 
                                     horiz_align="CENTER", 
                                     wrap="WRAP")
         msf.set_width(5, 70, end_col=5+int(slot_count)+1)
 
-        # MetaData Rows
-        START_ROW = 5
+        # Meta Rows
+        START_COL = 5
+        clerk_num = len(st.session_state.updated_personnel_df.index)
+        slot_num = len(st.session_state.slots)
         meta_row = [
-            [f"=SUM({msf.col_letter(START_ROW+i)}3:{msf.col_letter(START_ROW+i)}{row_idx-1})" for i in range(len(st.session_state.slots))], 
-            [f"=ArrayFormula(SUM(IF({msf.col_letter(START_ROW+i)}3:{msf.col_letter(START_ROW+i)}{row_idx-1}=\"R\",1,0)))" for i in range(len(st.session_state.slots))], 
-            [f"=ArrayFormula(SUM(IF({msf.col_letter(START_ROW+i)}3:{msf.col_letter(START_ROW+i)}{row_idx-1}=\"R2\",1,0)))" for i in range(len(st.session_state.slots))]
+            # Total, Reserve 1, Reserve 2 Count Rows
+            [f"=SUM({msf.col_letter(START_COL+i)}3:{msf.col_letter(START_COL+i)}{row_idx-1})" for i in range(slot_num)], 
+            [f"=ArrayFormula(SUM(IF({msf.col_letter(START_COL+i)}3:{msf.col_letter(START_COL+i)}{row_idx-1}=\"R\",1,0)))" for i in range(slot_num)], 
+            [f"=ArrayFormula(SUM(IF({msf.col_letter(START_COL+i)}3:{msf.col_letter(START_COL+i)}{row_idx-1}=\"R2\",1,0)))" for i in range(slot_num)],
+
+            # Clerk, Reserve 1, Reserve 2 Name Rows
+            [f"=IFERROR(INDEX($A$3:$A${2+clerk_num}, MATCH(1, INDEX($F$3:${msf.col_letter(START_COL+slot_num-1)}${2+clerk_num}, 0, MATCH({msf.col_letter(START_COL+i)}2, $F$2:${msf.col_letter(START_COL+slot_num-1)}$2, 0)), 0)), INDEX($A$3:$A${3+clerk_num-1}, MATCH(1, INDEX($F$3:${msf.col_letter(START_COL+slot_num-1)}${2+clerk_num}, 0, MATCH({msf.col_letter(START_COL+i)}2&\" AM\", $F$2:${msf.col_letter(START_COL+slot_num-1)}$2, 0)), 0)))" for i in range(slot_num)],
+            [f"=INDEX($A$3:$A${2+clerk_num}, MATCH(\"R\", INDEX($F$3:${msf.col_letter(START_COL+slot_num-1)}${2+clerk_num}, 0, MATCH({msf.col_letter(START_COL+i)}2, $F$2:${msf.col_letter(START_COL+slot_num-1)}$2, 0)), 0))"for i in range(slot_num)],
+            [f"=INDEX($A$3:$A${2+clerk_num}, MATCH(\"R2\", INDEX($F$3:${msf.col_letter(START_COL+slot_num-1)}${2+clerk_num}, 0, MATCH({msf.col_letter(START_COL+i)}2, $F$2:${msf.col_letter(START_COL+slot_num-1)}$2, 0)), 0))"for i in range(slot_num)],
         ]
-        master_ws.update(range_name=f"F{row_idx}", values=meta_row, value_input_option="USER_ENTERED")
+        master_ws.update(range_name=f"F{3+clerk_num}", values=meta_row, value_input_option="USER_ENTERED")
 
         msf.execute_req()
+    
+    def create_send_out():
+        send_ws = sh.add_worksheet(title=f"{MONTH_COLUMN_NAMES[month]}26 Send Out", rows=100, cols=11)
+        clerk_num = len(st.session_state.updated_personnel_df.index)
+        fixed_row = ["DAY", "DATE", "CLERK", "HP NO.", "BRANCH", "STANDBY", "HP NO.", "BRANCH", "STANDBY", "HP NO.", "BRANCH"]
+        slot_num = len(st.session_state.slots)
+        ssf = GSheet(sh, send_ws)
+
+        rows = [[f"{MONTH_COLUMN_NAMES[month]} {year} DUTY CLERK FORECAST"], fixed_row]
+
+        for i in range(len(st.session_state.slots)):
+            rows.append([
+                st.session_state.slots_as_days[i], # Day
+                st.session_state.slots[i], # Slot
+                "", # Duty Clerk
+                f"=VLOOKUP($C{i+3},'Personnel List'!D:F,2,0)", # Contact No.
+                f"=VLOOKUP($C{i+3},'Personnel List'!D:F,3,0)", # Branch
+                "", # R1
+                f"=VLOOKUP($F{i+3},'Personnel List'!D:F,2,0)", # Contact No.
+                f"=VLOOKUP($F{i+3},'Personnel List'!D:F,3,0)", # Branch
+                "", # R2
+                f"=VLOOKUP($I{i+3},'Personnel List'!D:F,2,0)", # Contact No.
+                f"=VLOOKUP($i{i+3},'Personnel List'!D:F,3,0)" # Branch
+            ])
+        
+        # Format
+        # Set title
+        ssf.format_cells(
+            start_row=0,
+            end_row=1,
+            fill_colour=rgb(204, 204, 204),
+            horiz_align="CENTER",
+            bold=True
+        )
+        ssf.merge_cells(start_row=0, end_row=1, start_col=0, end_col=11)
+        ssf.format_cells(
+            start_row=1,
+            end_row=2,
+            fill_colour=rgb(204, 204, 204),
+            horiz_align="CENTER", 
+            bold=True,
+        ) # Set Row 2
+
+        # Duty Clerk
+        ssf.set_width(0, 120, end_col=2) # Set Col A:B to width 120
+        ssf.format_cells(
+            start_row=2,
+            end_row=slot_num+2,
+            start_col=0,
+            end_col=2,
+            fill_colour=rgb(204, 204, 204), 
+            horiz_align="CENTER", 
+            bold=True,
+        ) # Format Col A:B
+        ssf.set_width(2, 380, end_col=3) # Set Col C to width 380
+        ssf.format_cells(
+            start_row=2,
+            end_row=slot_num+2,
+            start_col=2,
+            end_col=3,
+            fill_colour=rgb(183, 225, 205), 
+            horiz_align="CENTER", 
+        ) # Format Col C
+        ssf.set_width(3, 120, end_col=5) # Set Col D:E to width 120
+        ssf.format_cells(
+            start_row=2,
+            end_row=slot_num+2,
+            start_col=3,
+            end_col=5,
+            horiz_align="CENTER", 
+        ) # Format Col D:E
+
+        # Reserve 1
+        ssf.set_width(5, 380, end_col=6) # Set Col F to width 380
+        ssf.format_cells(
+            start_row=2,
+            end_row=slot_num+2,
+            start_col=5,
+            end_col=6,
+            fill_colour=rgb(249, 203, 156), 
+            horiz_align="CENTER", 
+        ) # Format Col F
+        ssf.set_width(6, 120, end_col=8) # Set Col G:H to width 120
+        ssf.format_cells(
+            start_row=2,
+            end_row=slot_num+2,
+            start_col=6,
+            end_col=8,
+            horiz_align="CENTER", 
+        ) # Format Col G:H
+
+        # Reserve 2
+        ssf.set_width(8, 380, end_col=9) # Set Col I to width 380    
+        ssf.format_cells(
+            start_row=2,
+            end_row=slot_num+2,
+            start_col=8,
+            end_col=9,
+            fill_colour=rgb(180, 167, 214), 
+            horiz_align="CENTER", 
+        ) # Format Col F
+        ssf.set_width(9, 120, end_col=11) # Set Col G:H to width 120
+        ssf.format_cells(
+            start_row=2,
+            end_row=slot_num+2,
+            start_col=9,
+            end_col=11,
+            horiz_align="CENTER", 
+        ) # Format Col G:H  
+
+        # Add borders
+        ssf.set_border(
+            start_row=0,
+            end_row=slot_num+2,
+            start_col=0,
+            end_col=11,
+        )
+
+        rows[2][2] = f"=TRANSPOSE('{new_sheet_title}'!F{clerk_num+6}:{ssf.col_letter(5+slot_num)}{len(st.session_state.updated_personnel_df.index)+6})"
+        rows[2][5] = f"=TRANSPOSE('{new_sheet_title}'!F{clerk_num+7}:{ssf.col_letter(5+slot_num)}{len(st.session_state.updated_personnel_df.index)+7})"
+        rows[2][8] = f"=TRANSPOSE('{new_sheet_title}'!F{clerk_num+8}:{ssf.col_letter(5+slot_num)}{len(st.session_state.updated_personnel_df.index)+8})"
+
+        send_ws.update(range_name=f"A1", values=rows, value_input_option="USER_ENTERED")
+        ssf.execute_req()
 
     def does_sheet_exists(ws):
         existing_titles = [ws.title for ws in sh.worksheets()]
-        if new_sheet_title in existing_titles:
+        if ws in existing_titles:
             return True
         return False
+    
+    if does_sheet_exists(f"{MONTH_COLUMN_NAMES[month]}26 Send Out"):
+        st.error(f"{MONTH_COLUMN_NAMES[month]}26 Send Out already exists. You cannot create another one")
+    else:
+        st.button(f"Create {MONTH_COLUMN_NAMES[month]}26 Send Out", on_click=create_send_out, use_container_width=True)
     
     if does_sheet_exists(new_sheet_title):
         st.error(f"{new_sheet_title} already exists. You cannot create another one")
     else:
         st.button(f"Create {new_sheet_title}", on_click=create_outline, type="primary", use_container_width=True)
-
+    
+    # Nav Buttons
     col1, col2 = st.columns(2)
     col1.button("← Back", on_click=prev_step, use_container_width=True)
     col2.button("Next →", on_click=next_step, use_container_width=True)
@@ -434,7 +581,7 @@ elif st.session_state.step == 3:
                 st.stop()
             
             st.session_state.prompt_df = pd.DataFrame(
-                [[entry[0], entry[1], json.dumps([str(p) for p in entry[2]])] for entry in list(prompt_json)],
+                [[entry[0], json.dumps(entry[1]), json.dumps([str(p) for p in entry[2]])] for entry in list(prompt_json)],
                 columns=["RANK & NAME", "Unavailable Dates", "Preferrences"]
             )
     if "prompt_df" in st.session_state:
@@ -476,7 +623,7 @@ elif st.session_state.step == 3:
                                         end_row=base_row+row_idx_no+1,
                                         start_col=base_col+col_idx,
                                         end_col=base_col+col_idx+1,
-                                        fill_colour=msf.rgb(0, 0, 0),
+                                        fill_colour=rgb(0, 0, 0),
                                         horiz_align="RIGHT")
                     
                     elif int(row[col]) == 2:
@@ -484,15 +631,15 @@ elif st.session_state.step == 3:
                                         end_row=base_row+row_idx_no+1,
                                         start_col=base_col+col_idx,
                                         end_col=base_col+col_idx+1,
-                                        fill_colour=msf.rgb(255, 0, 255),
+                                        fill_colour=rgb(255, 0, 255),
                                         horiz_align="RIGHT")
                     
                 row_idx_no += 1
             msf.execute_req()
 
-        # st.info(st.session_state.mastersheetf.batch_requests)
         st.button("Update Google Sheet", on_click=update_availability, type="primary", use_container_width=True)
 
+    # Nav Buttons
     col1, col2 = st.columns(2)
     col1.button("← Back", on_click=prev_step, use_container_width=True)
     col2.button("Next →", on_click=next_step, use_container_width=True, disabled="availability_df" not in st.session_state)
@@ -571,7 +718,7 @@ elif st.session_state.step == 4:
         st.subheader("Suggested Duty/Reserve")
         render_dataframe_with_dimensions(projected_df)
 
-    
+    # Nav Buttons
     col1, col2 = st.columns(2)
     col1.button("← Back", on_click=prev_step, use_container_width=True)
     col2.button(
@@ -651,6 +798,7 @@ elif st.session_state.step == 5:
     def update_schedule():
         base_row, base_col = 3, 5 # row is 1-indexed and col is 0-indexed
         batch_values = []
+        msf = st.session_state.mastersheetf
 
         for slot, row in st.session_state.schedule_df.iterrows():
             dcol = st.session_state.slots.index(slot)
@@ -660,36 +808,46 @@ elif st.session_state.step == 5:
             drow = st.session_state.planning_table.index.get_loc(duty_clerk)
             batch_values.append({"range": f"{st.session_state.mastersheetf.col_letter(base_col+dcol)}{base_row+drow}",
                                 "values": [[1]]})
+            msf.format_cells(
+                start_row=base_row+drow-1,
+                end_row=base_row+drow,
+                start_col=base_col+dcol,
+                end_col=base_col+dcol+1,
+                fill_colour=rgb(183, 225, 205), 
+                horiz_align="RIGHT")
 
             # Update R1 on Google Sheet
             duty_clerk = row["R1"]
             drow = st.session_state.planning_table.index.get_loc(duty_clerk)
             batch_values.append({"range": f"{st.session_state.mastersheetf.col_letter(base_col+dcol)}{base_row+drow}",
                                 "values": [["R"]]})
+            msf.format_cells(
+                start_row=base_row+drow-1,
+                end_row=base_row+drow,
+                start_col=base_col+dcol,
+                end_col=base_col+dcol+1,
+                fill_colour=rgb(249, 203, 156), 
+                horiz_align="LEFT")
             
             # Update R1 on Google Sheet
             duty_clerk = row["R2"]
             drow = st.session_state.planning_table.index.get_loc(duty_clerk)
             batch_values.append({"range": f"{st.session_state.mastersheetf.col_letter(base_col+dcol)}{base_row+drow}",
                                 "values": [["R2"]]})
-
-
-
+            msf.format_cells(
+                start_row=base_row+drow-1,
+                end_row=base_row+drow,
+                start_col=base_col+dcol,
+                end_col=base_col+dcol+1,
+                fill_colour=rgb(180, 167, 214), 
+                horiz_align="LEFT")
             
-
-        
+            msf.execute_req()
         st.session_state.mastersheetf.ws.batch_update(batch_values)
-            
-            
-            
-            
 
-    st.button("Update Google Sheet", on_click=update_schedule, disabled="schedule_df" not in st.session_state, type="primary", use_container_width=True)
+    st.button("Update Schedule", on_click=update_schedule, disabled="schedule_df" not in st.session_state, type="primary", use_container_width=True)
+    st.divider()
+
+    # Nav Buttons
     col1, col2 = st.columns(2)
     col1.button("← Back", on_click=prev_step, use_container_width=True)
-    col2.button(
-        "Next →",
-        on_click=next_step,
-        use_container_width=True,
-        disabled=not bool(st.session_state.primary_result),
-    )
