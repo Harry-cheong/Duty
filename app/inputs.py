@@ -23,6 +23,35 @@ MONTH_COLUMN_NAMES = {
 }
 
 
+def year_suffix(year: int) -> str:
+    """Two-digit year used in worksheet titles (e.g. 2026 → '26')."""
+    return f"{int(year) % 100:02d}"
+
+
+def master_overview_title(year: int, month: int) -> str:
+    return f"{MONTH_COLUMN_NAMES[int(month)]}{year_suffix(year)} Master Duty Overview"
+
+
+def send_out_title(year: int, month: int) -> str:
+    return f"{MONTH_COLUMN_NAMES[int(month)]}{year_suffix(year)} Send Out"
+
+
+def previous_months(year: int, month: int, count: int = 2) -> list[tuple[int, int]]:
+    """
+    Return (year, month) pairs for the previous `count` months,
+    most recent first. Wraps across year boundaries.
+    """
+    result: list[tuple[int, int]] = []
+    y, m = int(year), int(month)
+    for _ in range(count):
+        m -= 1
+        if m == 0:
+            m = 12
+            y -= 1
+        result.append((y, m))
+    return result
+
+
 @lru_cache(maxsize=None)
 def _singapore_public_holiday_lookup(year: int) -> dict[object, str]:
     return {

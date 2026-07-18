@@ -3,7 +3,7 @@ from __future__ import annotations
 import streamlit as st
 
 from export import GSheet
-from inputs import MONTH_COLUMN_NAMES, build_slot_config, slot_labels_from_config
+from inputs import MONTH_COLUMN_NAMES, build_slot_config, master_overview_title, send_out_title, slot_labels_from_config
 from ui.helpers import (
     highlight_special_days,
     next_step,
@@ -45,7 +45,8 @@ def render_step2(year: int, month: int) -> None:
     st.markdown(f"Assignable Duty Points: {slot_count}")
     
     # Create a new Master Overview for the month
-    new_sheet_title = f"{MONTH_COLUMN_NAMES[month]}26 Master Duty Overview"
+    new_sheet_title = master_overview_title(year, month)
+    send_sheet_title = send_out_title(year, month)
 
     if "sh" not in st.session_state: # Guard: make sure sh is defined
         st.error("No Google Sheet Connected")
@@ -151,7 +152,7 @@ def render_step2(year: int, month: int) -> None:
         msf.execute_req()
     
     def create_send_out():
-        send_ws = sh.add_worksheet(title=f"{MONTH_COLUMN_NAMES[month]}26 Send Out", rows=100, cols=11)
+        send_ws = sh.add_worksheet(title=send_sheet_title, rows=100, cols=11)
         clerk_num = len(st.session_state.updated_personnel_df.index)
         fixed_row = ["DAY", "DATE", "CLERK", "HP NO.", "BRANCH", "STANDBY", "HP NO.", "BRANCH", "STANDBY", "HP NO.", "BRANCH"]
         slot_num = len(st.session_state.slots)
@@ -280,10 +281,10 @@ def render_step2(year: int, month: int) -> None:
             return True
         return False
     
-    if does_sheet_exists(f"{MONTH_COLUMN_NAMES[month]}26 Send Out"):
-        st.error(f"{MONTH_COLUMN_NAMES[month]}26 Send Out already exists. You cannot create another one")
+    if does_sheet_exists(send_sheet_title):
+        st.error(f"{send_sheet_title} already exists. You cannot create another one")
     else:
-        st.button(f"Create {MONTH_COLUMN_NAMES[month]}26 Send Out", on_click=create_send_out, use_container_width=True)
+        st.button(f"Create {send_sheet_title}", on_click=create_send_out, use_container_width=True)
     
     if does_sheet_exists(new_sheet_title):
         st.error(f"{new_sheet_title} already exists. You cannot create another one")

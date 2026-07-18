@@ -1,20 +1,13 @@
-# Frontend
+# App
 
-Single-user Streamlit app with live sync to google sheet
+Streamlit entrypoint for Totally Fair Scheduler. Full setup and usage docs are in the [project README](../README.md).
 
-## Install
+## Quick start
 
 ```bash
 cd app
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-## Run
-
-```bash
 streamlit run app.py
 ```
-
-The app runs the scheduling logic in-process. No separate backend service is required.

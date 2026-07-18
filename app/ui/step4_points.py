@@ -5,12 +5,14 @@ import re
 import pandas as pd
 import streamlit as st
 
-from inputs import MONTH_COLUMN_NAMES
+from inputs import MONTH_COLUMN_NAMES, master_overview_title, previous_months
 from scheduling import SchedulerConfig, generate_planning_table
 from ui.helpers import next_step, prev_step, render_dataframe_with_dimensions
 
 
 def render_step4(
+    year: int,
+    month: int,
     min_gap_days: int,
     time_limit_seconds: int,
     random_seed: int,
@@ -22,8 +24,9 @@ def render_step4(
     st.caption("Tabulate duty and reserve points from the last 2 months and project next month's points.")
 
     def retrieve_data():
-        # Retrieve Duty Points
-        months = [MONTH_COLUMN_NAMES[month_int] for month_int in range(7-1, 7-3, -1)]
+        # Previous two calendar months relative to the selected planning month
+        history = previous_months(year, month, count=2)
+        months = [MONTH_COLUMN_NAMES[hist_month] for _, hist_month in history]
         
         # Total Duty Points
         st.session_state.duty_points_df = pd.DataFrame(columns=["NAME"] + [col for m in months for col in [f"{m} Duty", f"{m} R1", f"{m} R2"]]
@@ -32,8 +35,9 @@ def render_step4(
         st.session_state.duty_points_df["RANK & NAME"] = st.session_state.updated_personnel_df["RANK & NAME"]
         st.session_state.duty_points_df = st.session_state.duty_points_df.set_index("NAME")
 
-        for _month in months:
-            month_sheet = f"{_month}26 Master Duty Overview"
+        for hist_year, hist_month in history:
+            _month = MONTH_COLUMN_NAMES[hist_month]
+            month_sheet = master_overview_title(hist_year, hist_month)
             selected_sheet = st.session_state.sh.worksheet(month_sheet)
 
             # Extract points from the relevant months

@@ -6,11 +6,11 @@ import pandas as pd
 import streamlit as st
 
 from export import GSheet
-from inputs import MONTH_COLUMN_NAMES, build_availability_from_input
+from inputs import build_availability_from_input, master_overview_title
 from ui.helpers import next_step, prev_step, render_dataframe_with_dimensions, rgb
 
 
-def render_step3(month: int) -> None:
+def render_step3(year: int, month: int) -> None:
     st.header("Step 3. Availability And Preferences")
 
     # Preserve values explicitly at the top of the step
@@ -84,7 +84,10 @@ def render_step3(month: int) -> None:
     
     if "availability_df" in st.session_state:
         if "mastersheetf" not in st.session_state:
-            st.session_state.mastersheetf = GSheet(st.session_state.sh, st.session_state.sh.worksheet(f"{MONTH_COLUMN_NAMES[month]}26 Master Duty Overview"))
+            st.session_state.mastersheetf = GSheet(
+                st.session_state.sh,
+                st.session_state.sh.worksheet(master_overview_title(year, month)),
+            )
 
         # Colours the corresponding cells in the google sheet
         def update_availability():

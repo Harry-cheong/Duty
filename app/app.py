@@ -77,9 +77,11 @@ if st.session_state.step == 1:
 elif st.session_state.step == 2:
     render_step2(year, month)
 elif st.session_state.step == 3:
-    render_step3(month)
+    render_step3(year, month)
 elif st.session_state.step == 4:
     render_step4(
+        year=year,
+        month=month,
         min_gap_days=min_gap_days,
         time_limit_seconds=time_limit_seconds,
         random_seed=random_seed,
