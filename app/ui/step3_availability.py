@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import json
 
-import pandas as pd
 import streamlit as st
 
 from export import GSheet
-from inputs import build_availability_from_input, master_overview_title
+from inputs import (
+    build_availability_from_input,
+    master_overview_title,
+    parse_availability_json,
+    resolve_clerk_name,
+)
 from ui.helpers import next_step, prev_step, render_dataframe_with_dimensions, rgb
 
 
@@ -14,80 +18,94 @@ def render_step3(year: int, month: int) -> None:
     st.header("Step 3. Availability And Preferences")
 
     # Preserve values explicitly at the top of the step
-    if "prompt_df" not in st.session_state:
-        # Step 1
+    # Step 1
+    with st.container(border=True):
+        st.markdown("**Step 1 — User Input**")
+        st.text_area(
+            label="Copy and paste responses here",
+            key="response"
+        )
+
+    # Step 2 — only shows when Step 1 is filled
+    if "response" in st.session_state and st.session_state.response:
         with st.container(border=True):
-            st.markdown("**Step 1 — User Input**")
+            st.markdown("**Step 2 — Generate Prompt**")
+            st.caption("Copy this prompt into ChatGPT or Claude.")
+            st.code(f"""
+    Here is a list of clerks {st.session_state.updated_personnel_df["RANK & NAME"].tolist()}.
+    Here is the text with all the responses {st.session_state.response}
+
+    I want you to find and match their responses with the clerks in the list based on their names. Use the rank and name stated in the clerks_list if there is a conflict. Ignore the month.
+
+    For each entry,
+    - Expand date ranges into individual day numbers as integers (1, 2, 13), not strings
+    - Use "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday", "Weekdays", "Weekends"
+    - Shifts: "AM", "PM", or combined like "13 (AM)", "Weekends AM", "Monday PM"
+    - A whole calendar day (both AM and PM): 12 or "12 (24hr)"
+    - Make sure that all strings, including RANK_AND_NAME, are in double quotes
+
+    The result should be in the below json format:
+    [
+        ["PTE Cheong Jun Kai Harry", [1, 2, 4, 5], ["Weekends"]],
+        ...
+    ]
+
+    Answer only the entries.
+    """, language=None, height=100)
+    
+        # Step 3 - collect LLM Response
+        with st.container(border=True):
+            st.markdown("**Step 3 - Input Response**")
+            
             st.text_area(
-                label="Copy and paste responses here",
-                key="response"
+                label="Copy and paste LLM response here",
+                key="prompt_response"
             )
-
-        # Step 2 — only shows when Step 1 is filled
-        if "response" in st.session_state and st.session_state.response:
-            with st.container(border=True):
-                st.markdown("**Step 2 — Generate Prompt**")
-                st.caption("Copy this prompt into ChatGPT or Claude.")
-                st.code(f"""
-        Here is a list of clerks {st.session_state.updated_personnel_df["RANK & NAME"].tolist()}.
-        Here is the text with all the responses {st.session_state.response}
-
-        I want you to find and match their responses with the clerks in the list based on their names. Use the rank and name stated in the clerks_list if there is a conflict. Ignore the month.
-
-        For each entry,
-        - List down all the dates in a range
-        - Use "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday", "Weekdays", "Weekends"
-
-        The result should be in the below format:
-        [
-            [Clerk_name, unavailable dates, preferences] ["PTE Cheong Jun Kai Harry", [1, 2, 4, 5], ["Weekends"]],
-            ...
-        ]
-
-        Answer only the entries.
-        """, language=None, height=100)
-        
-            # Step 3 - collect LLM Response
-            with st.container(border=True):
-                st.markdown("**Step 3 - Input Response**")
-                
-                st.text_area(
-                    label="Copy and paste LLM response here",
-                    key="prompt_response"
-                )
         
         if "prompt_response" in st.session_state and st.session_state.prompt_response:
             try:
-                prompt_json = json.loads(st.session_state.prompt_response)
+                st.session_state.prompt_json = parse_availability_json(st.session_state.prompt_response)
+            except json.JSONDecodeError:
+                st.caption("Waiting for a complete JSON array.")
             except Exception as e:
                 st.error("LLM Response is Invalid")
                 st.error(e)
-                st.stop()
-            
-            st.session_state.prompt_df = pd.DataFrame(
-                [[entry[0], json.dumps(entry[1]), json.dumps([str(p) for p in entry[2]])] for entry in list(prompt_json)],
-                columns=["RANK & NAME", "Unavailable Dates", "Preferrences"]
-            )
-    if "prompt_df" in st.session_state:
-        st.success("Successfully Loaded!")
-        render_dataframe_with_dimensions(st.session_state.prompt_df)
-        try:
-            st.session_state.availability_df = build_availability_from_input(
-                st.session_state.updated_personnel_df, 
-                st.session_state.prompt_df, 
-                st.session_state.slots,
-                st.session_state.slots_as_days,
-                )
-            # render_dataframe_with_dimensions(st.session_state.availability_df)
-        except Exception as err:
-            st.error(err)
-    
+            else:
+                try:
+                    st.session_state.availability_df = build_availability_from_input(
+                        st.session_state.updated_personnel_df,
+                        st.session_state.prompt_json,
+                        st.session_state.slots,
+                        st.session_state.slots_as_days,
+                    )
+                    unmatched = [
+                        row[0] for row in st.session_state.prompt_json
+                        if resolve_clerk_name(row[0], st.session_state.availability_df.index) is None
+                    ]
+                    if unmatched:
+                        st.warning(
+                            "These names from the LLM output were not in the personnel list and were skipped: "
+                            + ", ".join(unmatched)
+                        )
+                    total = len(st.session_state.prompt_json)
+                    processed = total - len(unmatched)
+                    st.success(
+                        f"Success — "
+                        f"{processed} out of {total} clerks processed"
+                    )
+                except Exception as err:
+                    st.error(err)
+
     if "availability_df" in st.session_state:
+        render_dataframe_with_dimensions(st.session_state.availability_df)
         if "mastersheetf" not in st.session_state:
-            st.session_state.mastersheetf = GSheet(
-                st.session_state.sh,
-                st.session_state.sh.worksheet(master_overview_title(year, month)),
-            )
+            try:
+                st.session_state.mastersheetf = GSheet(
+                    st.session_state.sh,
+                    st.session_state.sh.worksheet(master_overview_title(year, month)),
+                )
+            except Exception as err:
+                st.error(f"Could not open {master_overview_title(year, month)}: {err}")
 
         # Colours the corresponding cells in the google sheet
         def update_availability():
@@ -124,7 +142,13 @@ def render_step3(year: int, month: int) -> None:
                 row_idx_no += 1
             msf.execute_req()
 
-        st.button("Update Google Sheet", on_click=update_availability, type="primary", use_container_width=True)
+        st.button(
+            "Update Google Sheet",
+            on_click=update_availability,
+            type="primary",
+            use_container_width=True,
+            disabled="mastersheetf" not in st.session_state,
+        )
 
     # Nav Buttons
     col1, col2 = st.columns(2)

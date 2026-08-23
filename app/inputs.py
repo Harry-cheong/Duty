@@ -80,6 +80,7 @@ def build_slot_config(year: int, month: int) -> pd.DataFrame:
         },
     )
 
+
 def slot_labels_from_config(config_df: pd.DataFrame) -> tuple[list[str], list[str]]:
     slots: list[str] = []
     days: list[str] = []
@@ -111,30 +112,100 @@ def build_availability_template(clerks_df: pd.DataFrame, slots: list[str]) -> pd
     )
 
 
-def _preferred_slots_for_token(tokens: str, slot_metadata: list[dict[str, object]]) -> set[str]:
-    tokens = json.loads(tokens)
+def parse_availability_json(text: str):
+    """Parse the LLM paste from Step 3 into a list of [name, unavail, pref] triples."""
+    payload = (text or "").strip()
+    if payload.startswith("```"):
+        payload = re.sub(r"^```(?:json)?\s*", "", payload, flags=re.IGNORECASE)
+        payload = re.sub(r"\s*```$", "", payload)
+    data = json.loads(payload)
+    if isinstance(data, str):
+        data = json.loads(data)
+    if not isinstance(data, list):
+        raise ValueError("Expected a JSON array of [name, unavailable, preferences]")
+    for i, row in enumerate(data):
+        if not isinstance(row, (list, tuple)) or len(row) != 3:
+            raise ValueError(
+                f"Entry {i} must be [RANK & NAME, unavailable list, preference list], got {row!r}"
+            )
+    return data
+
+
+def _normalize_piece(piece: str):
+    cleaned = piece.strip().strip("()[]").strip()
+    if not cleaned:
+        return None
+    if cleaned.isdigit():
+        return int(cleaned)
+    return cleaned
+
+
+def _token_parts(token) -> list:
+    '''
+    Check for validity of token
+    '''
+    if isinstance(token, bool) or token is None:
+        raise ValueError(f"Error parsing token {token!r}")
+    if isinstance(token, int):
+        return [token]
+    if isinstance(token, float) and token.is_integer():
+        return [int(token)]
+    if not isinstance(token, str):
+        raise ValueError(f"Error parsing token {token!r}")
+
+    pieces = []
+    for raw in re.sub(r"[()]", " ", token).split():
+        part = _normalize_piece(raw)
+        if part is not None:
+            pieces.append(part)
+    if "24hr" in pieces:
+        pieces = [part for part in pieces if part != "24hr"]
+    if not pieces:
+        raise ValueError(f"Error parsing token {token!r}")
+    return pieces
+
+
+def match_token_to_slots(tokens, slot_metadata: list[dict[str, object]]) -> set[str]:
     slots = set()
     if not tokens:
-        return set()
-    simple = [t for t in tokens if len(t.split()) == 1]
-    complex = [set(t.split()) for t in tokens if len(t.split()) == 2]
-    if any(token not in simple and token not in complex for token in tokens):
-        raise ValueError(f"Error parsing token '{tokens}'")
-    
-    # TODO: What if simple and complex tokens conflict?
+        return slots
+    simple = []
+    complex = []
+
+    for token in tokens:
+        parts = _token_parts(token)
+        if len(parts) == 1:
+            simple.append(parts[0])
+        elif len(parts) == 2:
+            complex.append(frozenset(str(part) for part in parts))
+        else:
+            raise ValueError(f"Error parsing token {token!r}")
+
     for metadata in slot_metadata:
-        # Simple Tokens e.g. "Monday", "Tuesday", "Weekends", 11
-        if str(metadata["day"]) in simple or metadata["day_type"]in simple or metadata["day_name"] in simple:
+        props = {
+            str(metadata["day"]),
+            metadata["day_type"],
+            metadata["day_name"],
+        }
+        if metadata["shift"]:
+            props.add(metadata["shift"])
+
+        # Simple tokens e.g. "Monday", "Weekends", 11, "AM"
+        if (
+            metadata["day"] in simple
+            or str(metadata["day"]) in simple
+            or metadata["day_type"] in simple
+            or metadata["day_name"] in simple
+            or (metadata["shift"] is not None and metadata["shift"] in simple)
+        ):
             slots.add(metadata["slot"])
             continue
-        
-        # Complex Tokens e.g. "Weekends AM"
-        metadata_set = set([str(metadata["day"]), metadata["day_type"], metadata["day_name"]])
-        for t in complex:
-            if t.issubset(metadata_set):
+
+        # Complex tokens e.g. "Weekends AM", "13 (AM)", "Monday PM"
+        for token_set in complex:
+            if token_set.issubset(props):
                 slots.add(metadata["slot"])
                 break
-        
     return slots
 
 
@@ -163,9 +234,24 @@ def _slot_metadata(slot, slot_as_day) -> dict[str, object]:
         "day_name": slot_as_day
     }
 
+def resolve_clerk_name(clerk_name, personnel_names):
+    """Map an LLM name onto a personnel RANK & NAME label, ignoring case."""
+    wanted = str(clerk_name).strip()
+    if wanted in personnel_names:
+        return wanted
+    folded = wanted.casefold()
+    matches = [
+        label for label in personnel_names
+        if str(label).strip().casefold() == folded
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
 def build_availability_from_input(
     clerks_df: pd.DataFrame,
-    response_df: pd.DataFrame,
+    response_json,
     slots: list[str],
     slots_as_days: list[str],
 ):
@@ -181,41 +267,21 @@ def build_availability_from_input(
     slot_metadata = []
     for s, d in zip(slots, slots_as_days):
         slot_metadata.append(_slot_metadata(s, d))
-
-    response_lookup = response_df.set_index("RANK & NAME") if not response_df.empty else None
-
-    for clerk_name in availability_df.index:
-        if clerk_name.strip() not in response_lookup.index: # Clerk has not indicated unavailable dates and preferrences
+        
+    for clerk, unavail, pref in response_json:
+        clerk_name = resolve_clerk_name(clerk, availability_df.index)
+        if clerk_name is None:
             continue
 
-        response = response_lookup.loc[clerk_name]
-        if isinstance(response, pd.DataFrame):
-            response = response.iloc[-1]
+        unavailable_slots = match_token_to_slots(unavail, slot_metadata)
+        for slot in unavailable_slots:
+            availability_df.loc[clerk_name, slot] = 0
 
-        unavailable_days = response.get("Unavailable Dates")
-        
-        # Parse back from JSON string if needed
-        if isinstance(unavailable_days, str):
-            unavailable_days = json.loads(unavailable_days)
-        if not isinstance(unavailable_days, list):
-            unavailable_days = []
-
-        for item in slot_metadata:
-            slot_date = item["day"]
-            slot_type = item["day_type"]
-            slot_day_name = item["day_name"]
-
-            # Indicate Unavailabilies
-            if slot_date in unavailable_days or slot_type in unavailable_days or slot_day_name in unavailable_days:
-                availability_df.loc[clerk_name, str(item["slot"])] = 0
-        
-        preferrence_tokens = response.get("Preferrences")
-        preferred_slots = _preferred_slots_for_token(preferrence_tokens, slot_metadata)
-
-        for p in preferred_slots:
+        preferred_slots = match_token_to_slots(pref, slot_metadata)
+        for slot in preferred_slots:
             # Unavailable dates should take precedence over preferred dates
-            if int(availability_df.loc[clerk_name, p]) == 1:
-                availability_df.loc[clerk_name, p] = 2
+            if int(availability_df.loc[clerk_name, slot]) == 1:
+                availability_df.loc[clerk_name, slot] = 2
 
     return availability_df
 
